@@ -51,7 +51,7 @@ export function FooterSection() {
               </Link>
 
               <p className="text-muted-foreground leading-relaxed mb-8 max-w-xs">
-                The all-in-one content management platform for agencies. Upload, schedule, and deliver content to unlimited clients — all from one dashboard.
+                Done-for-you social media content. We create scroll-stopping posts, reels, and stories — you download and post. Focus on your business, not your feed.
               </p>
 
               {/* Social Links */}

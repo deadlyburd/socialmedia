@@ -119,6 +119,12 @@ export async function requireTenantAccess(c: Context, next: Next): Promise<Respo
  */
 export async function requireAdmin(c: Context, next: Next): Promise<Response | void> {
   const session = c.get("session");
+  if (!session.role) {
+    return c.json(
+      { success: false, error: "Account setup incomplete. Please complete onboarding." },
+      403,
+    );
+  }
   if (session.role !== "admin") {
     return c.json(
       { success: false, error: "Admin access required." },
@@ -134,6 +140,12 @@ export async function requireAdmin(c: Context, next: Next): Promise<Response | v
  */
 export async function requireClient(c: Context, next: Next): Promise<Response | void> {
   const session = c.get("session");
+  if (!session.role) {
+    return c.json(
+      { success: false, error: "Account setup incomplete. Please complete onboarding." },
+      403,
+    );
+  }
   if (session.role !== "client") {
     return c.json(
       { success: false, error: "Client access required." },

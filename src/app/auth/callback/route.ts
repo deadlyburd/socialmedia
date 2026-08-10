@@ -1,96 +1,134 @@
 /**
  * GET /auth/callback — Supabase OAuth callback handler.
  *
- * Supabase redirects here after Google OAuth. We exchange the code
- * for a session, ensure a user record exists in our users table,
- * then redirect based on role and onboarding status.
+ * THE KEY INSIGHT: In Next.js 15 Route Handlers, cookies().set() from
+ * next/headers sets cookies on the implicit response. But if we return
+ * NextResponse.redirect(), that creates a NEW response WITHOUT those cookies.
+ *
+ * Solution: Create the redirect response FIRST, build a Supabase client
+ * that sets cookies directly on it, then return it.
  */
-import { createClient } from "@/auth";
-import { getAdminClient } from "@/lib/supabase/admin";
 import { NextResponse, type NextRequest } from "next/server";
+import { createServerClient } from "@supabase/ssr";
 
 export async function GET(request: NextRequest) {
-  const { searchParams, origin } = new URL(request.url);
-  const code = searchParams.get("code");
-  const next = searchParams.get("next") ?? "";
-
-  if (!code) {
-    return NextResponse.redirect(`${origin}/login?error=no_code`);
-  }
-
   try {
-    const supabase = await createClient();
-    const { error } = await supabase.auth.exchangeCodeForSession(code);
+    const requestUrl = new URL(request.url);
+    const code = requestUrl.searchParams.get("code");
 
+    if (!code) {
+      return NextResponse.json({ error: "no_code" }, { status: 400 });
+    }
+
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+    const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY!;
+
+    // Step 1: Exchange code for session using request cookies (for reading)
+    // and a temporary response for writing cookies
+    const cookieJar: Array<{ name: string; value: string; options: Record<string, unknown> }> = [];
+
+    const supabase = createServerClient(supabaseUrl, supabaseAnonKey, {
+      cookies: {
+        getAll() {
+          return request.cookies.getAll();
+        },
+        setAll(cookiesToSet) {
+          // Collect cookies into our jar — we'll apply them to the final response
+          for (const c of cookiesToSet) {
+            cookieJar.push({
+              name: c.name,
+              value: c.value,
+              options: {
+                ...c.options,
+                httpOnly: true,
+                secure: process.env.NODE_ENV === "production",
+                sameSite: "lax" as const,
+                path: "/",
+              },
+            });
+          }
+        },
+      },
+    });
+
+    const { error } = await supabase.auth.exchangeCodeForSession(code);
     if (error) {
-      console.error("[auth/callback] Code exchange failed:", error.message);
-      return NextResponse.redirect(`${origin}/login?error=oauth_failed`);
+      console.error("[auth/callback] Exchange failed:", error.message);
+      return NextResponse.redirect(new URL("/login?error=oauth", request.url));
     }
 
     const { data: { user } } = await supabase.auth.getUser();
     if (!user?.email) {
-      return NextResponse.redirect(`${origin}/login?error=no_user`);
+      return NextResponse.redirect(new URL("/login?error=no_user", request.url));
     }
 
+    console.log("[auth/callback] Authenticated:", user.email);
+
+    // Step 2: Check/create user record
+    const { getAdminClient } = await import("@/lib/supabase/admin");
     const adminClient = getAdminClient();
 
-    // Check if user record exists in our users table
     const { data: profile } = await adminClient
       .from("users")
       .select("id, role, onboarding_complete")
       .eq("id", user.id)
       .maybeSingle();
 
+    let redirectPath = "/onboarding"; // default for new users
+
     if (!profile) {
-      // New Google sign-in — create a user record
-      // Check if this is the very first user (they become admin)
-      const { count } = await adminClient
-        .from("users")
-        .select("*", { count: "exact", head: true });
+      let role: "admin" | "client" = "client";
+      try {
+        const { count } = await adminClient
+          .from("users")
+          .select("*", { count: "exact", head: true });
+        if ((count ?? 0) === 0) role = "admin";
+      } catch { /* default */ }
 
-      const role = (count ?? 0) === 0 ? "admin" : "client";
+      const name =
+        user.user_metadata?.full_name ??
+        user.user_metadata?.name ??
+        user.email.split("@")[0] ??
+        "User";
 
-      const { error: insertError } = await adminClient
-        .from("users")
-        .insert({
-          id: user.id,
-          email: user.email,
-          name: user.user_metadata?.full_name ?? user.user_metadata?.name ?? user.email.split("@")[0],
-          password_hash: "", // OAuth users have no password
-          role,
-          auth_provider: "google",
-          onboarding_complete: false,
-          created_at: new Date().toISOString(),
-        });
+      const { error: insertError } = await adminClient.from("users").insert({
+        id: user.id,
+        email: user.email,
+        name,
+        password_hash: "",
+        role,
+        onboarding_complete: false,
+        created_at: new Date().toISOString(),
+      });
 
       if (insertError) {
-        console.error("[auth/callback] Failed to create user record:", insertError.message);
-        return NextResponse.redirect(`${origin}/login?error=user_creation_failed`);
+        console.error("[auth/callback] Insert failed:", JSON.stringify(insertError));
+        return NextResponse.redirect(new URL("/login?error=db", request.url));
       }
 
-      console.log(`[auth/callback] Created new ${role} user via Google OAuth: ${user.email}`);
-
-      // New users go to onboarding
-      return NextResponse.redirect(`${origin}/onboarding`);
+      console.log(`[auth/callback] Created ${role}: ${user.email}`);
+    } else {
+      redirectPath = profile.role === "admin"
+        ? "/admin/dashboard"
+        : profile.role === "client"
+          ? "/client/calendar"
+          : "/onboarding";
+      console.log(`[auth/callback] Existing ${profile.role}: ${user.email} → ${redirectPath}`);
     }
 
-    // Existing user — redirect by role
-    if (profile.role === "admin") {
-      return NextResponse.redirect(`${origin}/admin/dashboard`);
-    }
-    if (profile.role === "client") {
-      return NextResponse.redirect(`${origin}/client/calendar`);
+    // Step 3: Build the redirect response WITH cookies
+    const redirectUrl = new URL(redirectPath, request.url);
+    const response = NextResponse.redirect(redirectUrl);
+
+    // Apply all collected cookies to this response
+    for (const c of cookieJar) {
+      response.cookies.set(c.name, c.value, c.options as any);
     }
 
-    // Incomplete onboarding
-    if (!profile.onboarding_complete) {
-      return NextResponse.redirect(`${origin}/onboarding`);
-    }
-
-    // Fallback redirect
-    return NextResponse.redirect(`${origin}/admin/dashboard`);
+    console.log(`[auth/callback] Redirecting to ${redirectPath} with ${cookieJar.length} cookies`);
+    return response;
   } catch (err: any) {
-    console.error("[auth/callback] Unexpected error:", err.message);
-    return NextResponse.redirect(`${origin}/login?error=unexpected`);
+    console.error("[auth/callback] CRASH:", err?.message);
+    return NextResponse.redirect(new URL("/login?error=crash", request.url));
   }
 }

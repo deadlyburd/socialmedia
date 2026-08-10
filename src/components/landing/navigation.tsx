@@ -6,8 +6,8 @@ import { Button } from "@/components/ui/button";
 import { ArrowRight, Zap } from "lucide-react";
 
 const navLinks = [
-  { name: "Features", href: "#features" },
   { name: "How it works", href: "#how-it-works" },
+  { name: "Features", href: "#features" },
   { name: "Pricing", href: "#pricing" },
 ];
 

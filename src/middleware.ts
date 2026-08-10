@@ -23,6 +23,7 @@ export async function middleware(request: NextRequest) {
   const isClientRoute = pathname.startsWith("/client");
 
   // ── Legacy protected routes (redirect to new paths) ────────────────
+  // NOTE: /onboarding is intentionally NOT here — new users need to access it
   const isLegacyProtected =
     pathname.startsWith("/dashboard") ||
     pathname.startsWith("/calendar") ||
@@ -31,8 +32,7 @@ export async function middleware(request: NextRequest) {
     pathname.startsWith("/trends") ||
     pathname.startsWith("/analytics") ||
     pathname.startsWith("/users") ||
-    pathname.startsWith("/settings") ||
-    pathname.startsWith("/onboarding");
+    pathname.startsWith("/settings");
 
   // ── Auth pages (should redirect to dashboard if already logged in) ─
   const isAuthPage = pathname === "/login" || pathname === "/";
@@ -79,7 +79,12 @@ export async function middleware(request: NextRequest) {
             },
           );
           const rows = await roleRes.json();
-          const role = (rows?.[0]?.role as string) ?? "client";
+          const role = (rows?.[0]?.role as string) ?? null;
+
+          // If role is null (user record doesn't exist yet), send to onboarding
+          if (!role) {
+            return NextResponse.redirect(new URL("/onboarding", request.url));
+          }
 
           if (isAdminRoute && role !== "admin") {
             return NextResponse.redirect(new URL("/client/calendar", request.url));
