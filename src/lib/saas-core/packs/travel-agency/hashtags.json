@@ -1,0 +1,37 @@
+{
+  "tier1": [
+    "#travel",
+    "#travelgram",
+    "#wanderlust",
+    "#travelphotography",
+    "#vacation",
+    "#holiday",
+    "#trip",
+    "#adventure"
+  ],
+  "tier2": [
+    "#traveltips",
+    "#travelguide",
+    "#travelblogger",
+    "#traveladdict",
+    "#bucketlist",
+    "#exploremore",
+    "#roamtheplanet",
+    "#traveltheworld"
+  ],
+  "tier3": [
+    "#travelexpert",
+    "#curatedtravel",
+    "#travelbetter",
+    "#insidertravel",
+    "#boutiquetravel",
+    "#authentictravel"
+  ],
+  "geo": [
+    "#visit{{location}}",
+    "#{{location}}travel",
+    "#{{location}}trip",
+    "#explore{{location}}",
+    "#discover{{location}}"
+  ]
+}

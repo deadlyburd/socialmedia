@@ -1,0 +1,44 @@
+{
+  "monday": {
+    "format": "carousel",
+    "category": "inspirational",
+    "title": "Monday Destination Spotlight",
+    "platforms": ["instagram", "pinterest"]
+  },
+  "tuesday": {
+    "format": "reel",
+    "category": "educational",
+    "title": "Tuesday Travel Tips",
+    "platforms": ["instagram", "tiktok"]
+  },
+  "wednesday": {
+    "format": "story",
+    "category": "inspirational",
+    "title": "Wednesday Wanderlust",
+    "platforms": ["instagram", "facebook"]
+  },
+  "thursday": {
+    "format": "reel",
+    "category": "educational",
+    "title": "Thursday Deep Dive",
+    "platforms": ["instagram", "tiktok"]
+  },
+  "friday": {
+    "format": "carousel",
+    "category": "promotional",
+    "title": "Friday Package Spotlight",
+    "platforms": ["instagram", "pinterest"]
+  },
+  "saturday": {
+    "format": "feed_post",
+    "category": "inspirational",
+    "title": "Saturday Photo Dump",
+    "platforms": ["instagram"]
+  },
+  "sunday": {
+    "format": "blog",
+    "category": "educational",
+    "title": "Sunday Travel Guide",
+    "platforms": ["pinterest", "medium"]
+  }
+}

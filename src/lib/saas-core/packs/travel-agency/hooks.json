@@ -1,0 +1,22 @@
+{
+  "formulas": [
+    "I wish I knew this before visiting {{destination}}...",
+    "This is what {{price}} gets you in {{destination}} vs {{comparison_city}}",
+    "POV: You're walking through {{location}} at {{time}}",
+    "Stop doing {{bad_behavior}} — do {{good_behavior}} instead",
+    "The real reason everyone is visiting {{destination}} this year",
+    "{{number}} things nobody tells you about {{destination}}",
+    "How to do {{destination}} in {{days}} days for under {{budget}}",
+    "What {{price_range}} actually gets you at {{destination}}"
+  ],
+  "provenAngles": [
+    "Budget breakdowns and cost comparisons",
+    "POV immersion walking tours",
+    "Before/after transformation (tourist vs. local experience)",
+    "Day-in-the-life itineraries",
+    "Seasonal timing guides (best time to visit)",
+    "Packing lists and preparation guides",
+    "Mistake avoidance guides",
+    "Comparison posts (destination vs. destination)"
+  ]
+}

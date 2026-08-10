@@ -1,0 +1,48 @@
+{
+  "instagram": {
+    "frequency": "5-7 posts/week + daily stories",
+    "bestTimes": ["Tue 11am", "Thu 1pm", "Wed 7pm", "Fri 11am"],
+    "bestFormats": ["reel", "carousel", "story"],
+    "tips": [
+      "Reels get 2x more reach than static posts",
+      "Use 3-tier hashtag strategy",
+      "Carousels have highest save rate",
+      "Geotag every post for local discovery",
+      "Respond to comments within 1 hour"
+    ]
+  },
+  "tiktok": {
+    "frequency": "3-5 videos/week",
+    "bestTimes": ["Tue 2pm", "Thu 5pm", "Fri 7pm"],
+    "bestFormats": ["short", "reel"],
+    "tips": [
+      "First 3 seconds determine retention",
+      "Use trending sounds for algorithm boost",
+      "Reply to comments with video responses",
+      "Post at peak audience time"
+    ]
+  },
+  "pinterest": {
+    "frequency": "5-10 pins/day",
+    "bestTimes": ["Sat 8pm", "Sun 7pm", "Fri 9pm"],
+    "bestFormats": ["pin"],
+    "tips": [
+      "Vertical 2:3 ratio performs best",
+      "Rich pins drive 2x more clicks",
+      "SEO descriptions are critical",
+      "Create boards by category",
+      "Repin old content with new keywords"
+    ]
+  },
+  "youtube": {
+    "frequency": "1-2 videos/week",
+    "bestTimes": ["Thu 2pm", "Fri 4pm"],
+    "bestFormats": ["long_form", "short"],
+    "tips": [
+      "Thumbnail is 80% of click-through",
+      "First 30 seconds must deliver on title",
+      "SEO-optimized titles with year",
+      "End screens drive subscription rate"
+    ]
+  }
+}

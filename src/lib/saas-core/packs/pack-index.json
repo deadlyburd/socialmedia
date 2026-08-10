@@ -1,0 +1,87 @@
+[
+  {
+    "slug": "travel-agency",
+    "name": "Travel Agency & Tours",
+    "description": "Hotels, tour operators, DMCs, cruise specialists. Pre-loaded with travel-specific hooks, hashtags, and playbooks.",
+    "icon": "✈️",
+    "categories": ["travel", "tourism", "hospitality"],
+    "exampleBusinesses": [
+      "Rome tour agency",
+      "Bali resort operator",
+      "NYC walking tours",
+      "Safari company"
+    ],
+    "path": "packs/travel-agency",
+    "featured": true
+  },
+  {
+    "slug": "real-estate",
+    "name": "Real Estate & Property",
+    "description": "Agents, brokerages, luxury properties, vacation rentals. Walkthrough reels and market education content.",
+    "icon": "🏠",
+    "categories": ["real estate", "property", "rentals"],
+    "exampleBusinesses": [
+      "Miami realtor",
+      "London luxury agent",
+      "Airbnb property manager",
+      "Commercial broker"
+    ],
+    "path": "packs/real-estate",
+    "featured": true
+  },
+  {
+    "slug": "restaurant",
+    "name": "Restaurants & Food",
+    "description": "Restaurants, cafes, bars, food trucks, caterers. Chef POV reels, dish cinematography, behind-the-scenes.",
+    "icon": "🍽️",
+    "categories": ["food", "restaurant", "hospitality"],
+    "exampleBusinesses": [
+      "Italian restaurant",
+      "NYC cafe chain",
+      "Food truck fleet",
+      "Catering company"
+    ],
+    "path": "packs/restaurant",
+    "featured": true
+  },
+  {
+    "slug": "fitness-coaching",
+    "name": "Fitness & Coaching",
+    "description": "Gyms, personal trainers, nutritionists, life coaches. Transformation stories, workout breakdowns.",
+    "icon": "💪",
+    "categories": ["fitness", "coaching", "wellness"],
+    "exampleBusinesses": [
+      "Personal trainer",
+      "Yoga studio",
+      "Nutrition coach",
+      "Life coach"
+    ],
+    "path": "packs/fitness-coaching",
+    "featured": true
+  },
+  {
+    "slug": "dental-clinic",
+    "name": "Dental & Medical Clinics",
+    "description": "Dentists, dermatologists, med spas, optometrists. Patient education and practice humanization.",
+    "icon": "🦷",
+    "categories": ["medical", "dental", "healthcare"],
+    "exampleBusinesses": [
+      "Dental clinic",
+      "Med spa",
+      "Dermatologist practice",
+      "Optometrist"
+    ],
+    "path": "packs/dental-clinic",
+    "featured": true
+  },
+  {
+    "slug": "custom",
+    "name": "Custom / Build Your Own",
+    "description": "Any business not covered by the pre-built packs. Answer 10 questions and we auto-generate your pack.",
+    "icon": "⚡",
+    "categories": ["custom", "other"],
+    "exampleBusinesses": ["Any business type — we adapt to you."],
+    "path": "packs/custom",
+    "featured": false
+  }
+]
