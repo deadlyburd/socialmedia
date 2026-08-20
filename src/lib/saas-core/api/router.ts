@@ -20,26 +20,20 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import {
   requireAuth,
-  requireTenantAccess,
   requireAdmin,
   requireClient,
   requireAgencyAccess,
+  resolveAgencyOwnerId,
   getClientIP,
 } from "../../auth/hono-adapter";
-import { hashPassword, verifyPassword } from "../../auth/password";
+import { hashPassword } from "../../auth/password";
 import { rateLimitByIP, rateLimitByEmail } from "../../auth/rate-limit";
 import { createUser as storeCreateUser, getUserByEmail, getUserById, markOnboardingComplete as storeMarkOnboardingComplete, updateUser, getClientsByAdmin } from "../../auth/user-store";
 import { getAdminClient } from "../../supabase/admin";
-import { AnalyticsService } from "../services/analytics-service";
 import { AuthService } from "../services/auth-service";
-import { contentReverseEngineer } from "../services/content-reverse-engineer";
-import { contentService } from "../services/content-service";
-import { PackService } from "../services/pack-service";
-import { promptCache } from "../services/prompt-cache";
-import { getTelegramBot, linkTenantChat } from "../services/telegram-bot";
 import { tenantService } from "../services/tenant-service";
-import { websiteScraper } from "../services/website-scraper";
-import { WorkflowEngine } from "../services/workflow-engine";
+import { getTenantFromDB, getEntitlements, assertFeature, assertQuota } from "../services/entitlements";
+import { listTeam, createMember, updateMemberRole, removeMember } from "../services/team-service";
 import { validate, honoErrorHandler, ValidationError, ApiError, logger, schemas } from "../../api-utils";
 import type { ApiResponse } from "../types";
 
@@ -63,9 +57,6 @@ app.notFound((c) => {
 // ── Shared services ──────────────────────────────────────────────────
 
 const authService = new AuthService();
-const packService = new PackService();
-const analyticsService = new AnalyticsService();
-const workflow = new WorkflowEngine(authService, undefined, contentService, undefined, undefined, undefined);
 
 // ── Reset codes (in-memory — use Redis/DB in production) ───────────
 
@@ -196,50 +187,7 @@ app.post("/api/auth/reset-password", async (c) => {
 // PROTECTED ENDPOINTS — require auth cookie
 // ═══════════════════════════════════════════════════════════════════════
 
-// ── Onboarding: Select Niche ─────────────────────────────────────────
-
-app.post("/api/onboarding/niche", requireAuth, async (c) => {
-  const session = c.get("session");
-  const { niche, packSlug, businessDescription } = await c.req.json();
-  if (!niche) {
-    return c.json({ success: false, error: "Niche is required." }, 400);
-  }
-
-  const state = authService.setNiche(session.sub, niche, packSlug ?? niche, businessDescription);
-  const pack = packService.getPack(packSlug) ?? packService.loadPacks().find(p => p.slug === "custom");
-
-  return c.json({ success: true, data: { onboarding: state, pack } });
-});
-
-// ── Onboarding: Submit Website ───────────────────────────────────────
-
-app.post("/api/onboarding/website", requireAuth, async (c) => {
-  const session = c.get("session");
-  const { url } = await c.req.json();
-  if (!url?.match(/^https?:\/\/.+/)) {
-    return c.json({ success: false, error: "Valid URL starting with http:// or https:// is required." }, 400);
-  }
-
-  const state = await authService.setWebsite(session.sub, url);
-  const tenant = tenantService.createTenant({
-    name: session.name,
-    slug: session.email.replace(/[@.]/g, "-"),
-    email: session.email,
-  });
-  authService.linkTenant(session.sub, tenant.id);
-
-  return c.json({ success: true, data: { analysis: state.websiteAnalysis, tenant } });
-});
-
-// ── Mark onboarding complete ─────────────────────────────────────────
-
-app.post("/api/auth/onboarding-complete", requireAuth, async (c) => {
-  const session = c.get("session");
-  authService.markOnboardingComplete(session.sub);
-  return c.json({ success: true, data: { onboardingComplete: true } });
-});
-
-// ── Simple onboarding — niche + business name + website (no analysis) ─
+// ── Onboarding: complete (self-signup) ───────────────────────────────
 
 app.post("/api/onboarding/complete", requireAuth, async (c) => {
   const session = c.get("session");
@@ -322,148 +270,6 @@ app.post("/api/onboarding/complete", requireAuth, async (c) => {
   }
 });
 
-// ── Dashboard ────────────────────────────────────────────────────────
-
-app.get("/api/dashboard", requireAuth, async (c) => {
-  const session = c.get("session");
-  // Resolve to stored user ID (Supabase UUID → old custom ID via email bridge)
-  let userId = authService.resolveUserId(session.sub) ?? authService.resolveUserId(session.email) ?? session.sub;
-  const dashboard = workflow.getDashboard(userId);
-  return c.json({ success: true, data: dashboard });
-});
-
-// ── Platforms ────────────────────────────────────────────────────────
-
-app.post("/api/platforms/setup", requireAuth, async (c) => {
-  const session = c.get("session");
-  const body = await c.req.json();
-  const result = await workflow.setupPlatform({ userId: session.sub, ...body });
-  return c.json({ success: true, data: result });
-});
-
-app.get("/api/platforms/:tenantId", requireAuth, requireTenantAccess, async (c) => {
-  const tenantId = c.req.param("tenantId");
-  // PlatformSetupService is internal to WorkflowEngine
-  const dashboard = workflow.getDashboard(c.get("session").sub);
-  const platforms = dashboard.platforms.filter(p => {
-    // Filter by tenant — platforms are keyed by tenant ID inside the service
-    return true; // getDashboard already filters by user's tenants
-  });
-  return c.json({ success: true, data: platforms });
-});
-
-// ── Content ──────────────────────────────────────────────────────────
-
-app.post("/api/content/generate", requireAuth, async (c) => {
-  const session = c.get("session");
-  const body = await c.req.json();
-  const result = await workflow.generateAndNotify({ userId: session.sub, ...body });
-  return c.json({ success: true, data: result });
-});
-
-// Auto-resolve tenant from session (no tenant ID param needed)
-app.get("/api/content", requireAuth, async (c) => {
-  const session = c.get("session");
-  console.log("[api/content] session.sub:", session.sub, "email:", session.email);
-  // Try Supabase UUID first, then email, then stored custom ID
-  let tenantIds = authService.getUserTenants(session.sub);
-  console.log("[api/content] by UUID:", tenantIds);
-  if (!tenantIds || tenantIds.length === 0) {
-    tenantIds = authService.getUserTenants(session.email);
-    console.log("[api/content] by email:", tenantIds);
-  }
-  if (!tenantIds || tenantIds.length === 0) {
-    console.log("[api/content] No tenants found for user");
-    return c.json({ success: true, data: [] });
-  }
-  const content = await contentService.listContent(tenantIds[0]!);
-  console.log("[api/content] tenantId:", tenantIds[0], "content count:", content.length);
-  if (content.length > 0) {
-    console.log("[api/content] First item scheduledAt:", content[0]?.scheduledAt, "title:", content[0]?.title?.slice(0, 40));
-  }
-  return c.json({ success: true, data: content });
-});
-
-app.get("/api/content/:tenantId", requireAuth, requireTenantAccess, async (c) => {
-  const tenantId = c.req.param("tenantId");
-  const content = await contentService.listContent(tenantId);
-  return c.json({ success: true, data: content });
-});
-
-app.patch("/api/content/:id/status", requireAuth, async (c) => {
-  const { id } = c.req.param();
-  const { status } = await c.req.json();
-  const updated = contentService.updateStatus(id, status);
-  return c.json({ success: true, data: updated });
-});
-
-// ── Packs ────────────────────────────────────────────────────────────
-
-app.get("/api/packs", (c) => {
-  return c.json({ success: true, data: packService.loadPacks() });
-});
-
-app.get("/api/packs/:slug", (c) => {
-  const pack = packService.getPack(c.req.param("slug"));
-  if (!pack) return c.json({ success: false, error: "Pack not found." }, 404);
-  return c.json({ success: true, data: pack });
-});
-
-// ── Reverse Engineer ─────────────────────────────────────────────────
-
-app.get("/api/reverse-engineer/formulas", (c) => {
-  const formulas = contentReverseEngineer.listFormulas();
-  return c.json({ success: true, data: formulas });
-});
-
-app.post("/api/reverse-engineer/generate", async (c) => {
-  const body = await c.req.json();
-  const result = await contentReverseEngineer.reverseEngineer(body);
-  return c.json({ success: true, data: result });
-});
-
-// ── Analytics ────────────────────────────────────────────────────────
-
-// Auto-resolve tenant from session (no tenant ID param needed)
-app.get("/api/analytics", requireAuth, async (c) => {
-  const session = c.get("session");
-  let tenantIds = authService.getUserTenants(session.sub);
-  if (!tenantIds || tenantIds.length === 0) {
-    tenantIds = authService.getUserTenants(session.email);
-  }
-  if (!tenantIds || tenantIds.length === 0) {
-    return c.json({ success: true, data: { totalContent: 0, platformBreakdown: {}, trends: [], aiUsage: {} } });
-  }
-  const analytics = await analyticsService.getTenantAnalytics(tenantIds[0]!);
-  return c.json({ success: true, data: analytics });
-});
-
-app.get("/api/analytics/:tenantId", requireAuth, requireTenantAccess, async (c) => {
-  const tenantId = c.req.param("tenantId");
-  const analytics = await analyticsService.getTenantAnalytics(tenantId);
-  return c.json({ success: true, data: analytics });
-});
-
-// ── Prompt Cache ─────────────────────────────────────────────────────
-
-app.get("/api/cache/stats", (c) => {
-  return c.json({ success: true, data: promptCache.getStats() });
-});
-
-// ── Telegram ─────────────────────────────────────────────────────────
-
-app.get("/api/telegram/status", (c) => {
-  const bot = getTelegramBot();
-  return c.json({ success: true, data: { running: bot.isRunning(), username: bot.getUsername() } });
-});
-
-app.post("/api/telegram/link", requireAuth, async (c) => {
-  const session = c.get("session");
-  const { tenantId, chatId } = await c.req.json();
-  linkTenantChat(tenantId, chatId);
-  return c.json({ success: true, data: { linked: true } });
-});
-
 // ── Tenants ──────────────────────────────────────────────────────────
 
 app.get("/api/tenants", requireAuth, async (c) => {
@@ -482,50 +288,6 @@ app.post("/api/tenants", requireAuth, async (c) => {
   return c.json({ success: true, data: tenant }, 201);
 });
 
-// ── Queue (alias for content with pending status) ────────────────────
-
-app.get("/api/queue/:tenantId", requireAuth, async (c) => {
-  const tenantId = c.req.param("tenantId");
-  const items = await contentService.listContent(tenantId);
-  const pending = items.filter((i: any) => i.status === "pending_approval" || i.status === "draft");
-  return c.json({ success: true, data: pending });
-});
-
-app.post("/api/queue/bulk-approve", requireAuth, async (c) => {
-  const body = await c.req.json();
-  const results: any[] = [];
-  for (const id of (body.ids ?? [])) {
-    const updated = contentService.updateStatus(id, "published");
-    if (updated) results.push(updated);
-  }
-  return c.json({ success: true, data: results });
-});
-
-// ── Trends (stub for now) ───────────────────────────────────────────
-
-app.get("/api/trends", requireAuth, async (c) => {
-  const session = c.get("session");
-  let tenantIds = authService.getUserTenants(session.sub);
-  if (!tenantIds || tenantIds.length === 0) tenantIds = authService.getUserTenants(session.email);
-  const tenantId = tenantIds[0];
-  if (!tenantId) return c.json({ success: true, data: { trends: [] } });
-  const content = await contentService.listContent(tenantId);
-  return c.json({ success: true, data: { trends: content ?? [] } });
-});
-
-app.post("/api/trends/generate", requireAuth, async (c) => {
-  return c.json({ success: true, data: { message: "Trend generation queued" } });
-});
-
-// ── Notifications ────────────────────────────────────────────────────
-
-app.get("/api/notifications", requireAuth, async (c) => {
-  const session = c.get("session");
-  const userId = authService.resolveUserId(session.sub) ?? authService.resolveUserId(session.email) ?? session.sub;
-  const notifications = workflow.getDashboard(userId).notifications;
-  return c.json({ success: true, data: notifications });
-});
-
 // ═══════════════════════════════════════════════════════════════════════
 // ADMIN ENDPOINTS
 // ═══════════════════════════════════════════════════════════════════════
@@ -536,11 +298,14 @@ app.get("/api/admin/clients", requireAuth, requireAdmin, async (c) => {
   const session = c.get("session");
   const supabase = getAdminClient();
 
-  // Get all tenants owned by this admin
+  // Resolve the effective agency owner — team members act on behalf of their owner.
+  const ownerId = await resolveAgencyOwnerId(session.sub);
+
+  // Get all tenants owned by this agency
   const { data: tenants } = await supabase
     .from("tenants")
     .select("*")
-    .eq("agency_id", session.sub);
+    .eq("agency_id", ownerId);
 
   if (!tenants?.length) {
     return c.json({ success: true, data: [] });
@@ -554,18 +319,16 @@ app.get("/api/admin/clients", requireAuth, requireAdmin, async (c) => {
       .select("*", { count: "exact", head: true })
       .eq("tenant_id", t.id);
 
-    // Find the user linked to this tenant
-    const { data: users } = await supabase
-      .from("users")
-      .select("id, email, name")
-      .eq("email", t.email)
-      .limit(1);
+    // Find the user linked to this tenant via client_user_id (fallback to email).
+    const { data: users } = t.client_user_id
+      ? await supabase.from("users").select("id, email, name").eq("id", t.client_user_id).limit(1)
+      : await supabase.from("users").select("id, email, name").eq("email", t.email).limit(1);
 
     result.push({
-      userId: users?.[0]?.id ?? "",
+      userId: users?.[0]?.id ?? t.client_user_id ?? "",
       tenantId: t.id,
       name: users?.[0]?.name ?? t.name,
-      email: t.email,
+      email: users?.[0]?.email ?? t.email,
       businessName: t.name,
       status: t.status,
       createdAt: t.created_at,
@@ -597,8 +360,10 @@ app.post("/api/admin/clients", requireAuth, requireAdmin, async (c) => {
     const supabase = getAdminClient();
 
     // Create user in Supabase Auth
+    const emailLower = email.toLowerCase().trim();
+    const now = new Date().toISOString();
     const { data: authUser, error: authError } = await supabase.auth.admin.createUser({
-      email,
+      email: emailLower,
       password,
       email_confirm: true,
       user_metadata: { name },
@@ -608,35 +373,58 @@ app.post("/api/admin/clients", requireAuth, requireAdmin, async (c) => {
       return c.json({ success: false, error: authError.message }, 400);
     }
 
-    // Create user record in users table
-    const user = await storeCreateUser({ email, password, name, role: "client" });
+    // Key the `users` row by the Supabase Auth UUID (NOT a custom id), so that
+    // requireAuth → getUserRole(auth user.id) resolves the role when they log in.
+    const userId = authUser.user.id;
+    const { error: userErr } = await supabase.from("users").upsert({
+      id: userId,
+      email: emailLower,
+      name,
+      password_hash: hashPassword(password),
+      role: "client",
+      onboarding_complete: true,
+      created_at: now,
+    }, { onConflict: "id" });
+    if (userErr) {
+      return c.json({ success: false, error: `Failed to create client account: ${userErr.message}` }, 500);
+    }
 
-    // Create tenant
-    const slug = businessName.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-    const tenant = tenantService.createTenant({
-      name: businessName,
-      slug,
-      email,
-    });
+    // Create tenant (in-memory cache) and persist directly to Supabase with the
+    // agency + client links (tenant-service's REST adapter is unreliable on Vercel).
+    const slugBase = businessName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    const slug = `${slugBase || "client"}-${Date.now().toString(36).slice(-4)}`;
+    const tenant = tenantService.createTenant({ name: businessName, slug, email: emailLower });
 
-    // Link tenant to admin
-    tenantService.updateMetadata(tenant.id, { ownerName: name });
-    const supabase2 = getAdminClient();
-    await supabase2
-      .from("tenants")
-      .update({ agency_id: session.sub })
-      .eq("id", tenant.id);
+    const agencyOwnerId = await resolveAgencyOwnerId(session.sub);
+    const { error: tenantErr } = await supabase.from("tenants").upsert({
+      id: tenant.id,
+      name: tenant.name,
+      slug: tenant.slug,
+      email: emailLower,
+      tier: "free",
+      status: "trial",
+      trial_ends_at: null,
+      features_json: {},
+      metadata_json: { ownerName: name },
+      agency_id: agencyOwnerId,
+      client_user_id: userId,
+      created_at: now,
+      updated_at: now,
+    }, { onConflict: "id" });
+    if (tenantErr) {
+      return c.json({ success: false, error: `Failed to create client tenant: ${tenantErr.message}` }, 500);
+    }
 
-    authService.linkTenant(user.id, tenant.id);
-    authService.ensureSession(user.id, email, name);
+    authService.linkTenant(userId, tenant.id);
+    authService.ensureSession(userId, emailLower, name);
 
     return c.json({
       success: true,
       data: {
-        userId: user.id,
+        userId,
         tenantId: tenant.id,
-        name: user.name,
-        email: user.email,
+        name,
+        email: emailLower,
         businessName: tenant.name,
         temporaryPassword: password,
       },
@@ -701,6 +489,78 @@ app.get("/api/admin/calendar/:clientId", requireAuth, requireAdmin, requireAgenc
   return c.json({ success: true, data: assets ?? [] });
 });
 
+// ── Admin update content status (review / approve / deliver / reject) ─
+
+const CONTENT_STATUS_FLOW: Record<string, string[]> = {
+  planned: ["draft"],
+  draft: ["in_review", "rejected"],
+  in_review: ["revision_requested", "approved", "rejected"],
+  revision_requested: ["draft", "in_review"],
+  approved: ["delivered", "rejected"],
+  delivered: ["downloaded"],
+  downloaded: ["posted"],
+  posted: [],
+  rejected: ["draft"],
+};
+
+app.post("/api/admin/content/:id/status", requireAuth, requireAdmin, async (c) => {
+  const assetId = c.req.param("id");
+  const body = await validate(c, schemas.contentStatus);
+  const { status, note } = body;
+  const session = c.get("session");
+  const supabase = getAdminClient();
+
+  const { data: asset } = await supabase
+    .from("content_assets")
+    .select("tenant_id, status")
+    .eq("id", assetId)
+    .maybeSingle();
+
+  if (!asset) {
+    return c.json({ success: false, error: "Content not found." }, 404);
+  }
+
+  // Verify the admin owns this client's tenant
+  const { data: tenant } = await supabase
+    .from("tenants")
+    .select("agency_id")
+    .eq("id", (asset as any).tenant_id)
+    .maybeSingle();
+
+  const ownerId = await resolveAgencyOwnerId(session.sub);
+  if (!tenant || (tenant as any).agency_id !== ownerId) {
+    return c.json({ success: false, error: "Access denied." }, 403);
+  }
+
+  // Enforce the allowed transition
+  const current = (asset as any).status as string;
+  const allowed = CONTENT_STATUS_FLOW[current] ?? [];
+  if (!allowed.includes(status)) {
+    return c.json(
+      { success: false, error: `Cannot move content from "${current}" to "${status}".` },
+      400,
+    );
+  }
+
+  const patch: Record<string, any> = {
+    status,
+    reviewed_by: session.sub,
+    reviewed_at: new Date().toISOString(),
+  };
+  if (note) patch.review_note = note;
+
+  const { error } = await supabase
+    .from("content_assets")
+    .update(patch)
+    .eq("id", assetId);
+
+  if (error) {
+    return c.json({ success: false, error: "Failed to update status." }, 500);
+  }
+
+  return c.json({ success: true, data: { id: assetId, status } });
+});
+
 // ── Admin upload content ──────────────────────────────────────────────
 
 app.post("/api/admin/upload", requireAuth, requireAdmin, async (c) => {
@@ -731,17 +591,21 @@ app.post("/api/admin/upload", requireAuth, requireAdmin, async (c) => {
       return c.json({ success: false, error: "file, tenantId, and title are required." }, 400);
     }
 
-    // Verify tenant belongs to this admin
+    // Verify tenant belongs to this admin's agency
     const supabase = getAdminClient();
+    const ownerId = await resolveAgencyOwnerId(session.sub);
     const { data: tenant } = await supabase
       .from("tenants")
       .select("agency_id")
       .eq("id", tenantId)
       .maybeSingle();
 
-    if (!tenant || tenant.agency_id !== session.sub) {
+    if (!tenant || tenant.agency_id !== ownerId) {
       return c.json({ success: false, error: "Access denied." }, 403);
     }
+
+    // Paywall: enforce monthly post quota + trial/status gate.
+    await assertQuota(c, tenantId, "posts");
 
     // Upload file to storage (Vercel Blob → R2 → Base64 fallback)
     const { uploadFile } = await import("../../storage");
@@ -771,7 +635,7 @@ app.post("/api/admin/upload", requireAuth, requireAdmin, async (c) => {
       duration_seconds: null,
       platform,
       scheduled_date: scheduledDate,
-      status: "ready",
+      status: "draft",
       created_at: now,
       created_by: session.sub,
     };
@@ -793,6 +657,8 @@ app.post("/api/admin/upload", requireAuth, requireAdmin, async (c) => {
       },
     }, 201);
   } catch (err: any) {
+    // Let plan/validation errors propagate to the Hono error handler (402/403/404).
+    if (err instanceof ApiError) throw err;
     console.error("[api] Upload error:", err.message);
     return c.json({ success: false, error: "Upload failed." }, 500);
   }
@@ -802,21 +668,22 @@ app.post("/api/admin/upload", requireAuth, requireAdmin, async (c) => {
 // CLIENT ENDPOINTS
 // ═══════════════════════════════════════════════════════════════════════
 
-function getClientTenantId(c: any): string | null {
+async function getClientTenantId(c: any): Promise<string | null> {
   const session = c.get("session");
   if (!session?.email) return null;
-  // Resolve tenant from session
+  // Resolve tenant from in-memory session first
   const tenantIds = authService.getUserTenants(session.sub);
   if (tenantIds?.length) return tenantIds[0]!;
   const emailIds = authService.getUserTenants(session.email);
   if (emailIds?.length) return emailIds[0]!;
-  return null;
+  // Cold start / ID mismatch: fall back to the persisted client↔tenant link
+  return authService.getClientTenantIdFromDB(session.email);
 }
 
 // ── Client calendar ───────────────────────────────────────────────────
 
 app.get("/api/client/calendar", requireAuth, async (c) => {
-  const tenantId = getClientTenantId(c);
+  const tenantId = await getClientTenantId(c);
   if (!tenantId) {
     return c.json({ success: true, data: [] });
   }
@@ -826,6 +693,7 @@ app.get("/api/client/calendar", requireAuth, async (c) => {
     .from("content_assets")
     .select("*")
     .eq("tenant_id", tenantId)
+    .in("status", ["approved", "delivered", "downloaded", "posted", "revision_requested"])
     .order("scheduled_date", { ascending: true });
 
   return c.json({ success: true, data: assets ?? [] });
@@ -839,7 +707,7 @@ app.post("/api/client/content/:id/download", requireAuth, async (c) => {
 
   const { error } = await supabase
     .from("content_assets")
-    .update({ status: "downloaded" })
+    .update({ status: "downloaded", downloaded_at: new Date().toISOString() })
     .eq("id", assetId);
 
   if (error) {
@@ -855,7 +723,7 @@ app.post("/api/client/content/:id/post", requireAuth, async (c) => {
   const assetId = c.req.param("id");
   const body = await validate(c, schemas.postContent);
   const { platform } = body;
-  const tenantId = getClientTenantId(c);
+  const tenantId = await getClientTenantId(c);
 
   if (!tenantId) {
     return c.json({ success: false, error: "No account found." }, 400);
@@ -885,14 +753,13 @@ app.post("/api/client/content/:id/post", requireAuth, async (c) => {
   });
 
   if (result.success) {
-    // Mark as posted with platform URL
+    // Mark as posted — keep the platform URL in posted_url, not appended to description
     await supabase
       .from("content_assets")
       .update({
         status: "posted",
-        description: asset.description
-          ? `${asset.description}\n\nPosted to ${platform}: ${result.platformPostUrl ?? ""}`
-          : `Posted to ${platform}: ${result.platformPostUrl ?? ""}`,
+        posted_at: new Date().toISOString(),
+        posted_url: result.platformPostUrl ?? null,
       })
       .eq("id", assetId);
 
@@ -927,7 +794,7 @@ app.post("/api/client/content/:id/post", requireAuth, async (c) => {
 // ── Client accounts list ──────────────────────────────────────────────
 
 app.get("/api/client/accounts", requireAuth, async (c) => {
-  const tenantId = getClientTenantId(c);
+  const tenantId = await getClientTenantId(c);
   if (!tenantId) {
     return c.json({ success: true, data: [] });
   }
@@ -953,11 +820,14 @@ app.get("/api/client/accounts", requireAuth, async (c) => {
 app.post("/api/client/accounts/connect", requireAuth, async (c) => {
   const body = await validate(c, schemas.connectPlatform);
   const { platform } = body;
-  const tenantId = getClientTenantId(c);
+  const tenantId = await getClientTenantId(c);
 
   if (!tenantId) {
     return c.json({ success: false, error: "No tenant found." }, 400);
   }
+
+  // Paywall: enforce max connected platforms.
+  await assertQuota(c, tenantId, "platforms");
 
   // Get OAuth URL for real platform authentication
   const { getOAuthUrl, getAvailablePlatforms } = await import("../../social-oauth");
@@ -1002,7 +872,7 @@ app.post("/api/client/accounts/connect", requireAuth, async (c) => {
 
 app.get("/api/client/accounts/:platform/status", requireAuth, async (c) => {
   const platform = c.req.param("platform");
-  const tenantId = getClientTenantId(c);
+  const tenantId = await getClientTenantId(c);
 
   if (!tenantId) {
     return c.json({ success: false, error: "No tenant found." }, 400);
@@ -1026,7 +896,7 @@ app.get("/api/client/accounts/:platform/status", requireAuth, async (c) => {
 
 app.delete("/api/client/accounts/:platform", requireAuth, async (c) => {
   const platform = c.req.param("platform");
-  const tenantId = getClientTenantId(c);
+  const tenantId = await getClientTenantId(c);
 
   if (!tenantId) {
     return c.json({ success: false, error: "No tenant found." }, 400);
@@ -1053,6 +923,9 @@ app.post("/api/admin/generate-video", requireAuth, requireAdmin, async (c) => {
   if (!prompt || !tenantId) {
     return c.json({ success: false, error: "prompt and tenantId are required." }, 400);
   }
+
+  // Paywall: AI video generation requires the videoGeneration feature.
+  await assertFeature(c, tenantId, "videoGeneration");
 
   const { submitVideoGeneration } = await import("@/lib/services/seedance-service");
   const result = await submitVideoGeneration({
@@ -1098,40 +971,18 @@ app.post("/api/admin/generate-video/push", requireAuth, requireAdmin, async (c) 
       return c.json({ success: false, error: result.error }, 500);
     }
 
-    // Step 2: Upload to R2 (or store as base64 if R2 isn't configured)
+    // Step 2: Upload the video via the canonical storage service (R2 SigV4 / Blob)
     const supabase = getAdminClient();
     const assetId = `video_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const today = new Date().toISOString().split("T")[0]!;
 
-    let fileUrl: string;
-    const r2Endpoint = process.env.R2_ENDPOINT;
-    const r2Bucket = process.env.R2_BUCKET;
-    const r2Key = process.env.R2_ACCESS_KEY_ID;
-    const r2Secret = process.env.R2_SECRET_ACCESS_KEY;
-    const r2Public = process.env.R2_PUBLIC_URL;
-
-    if (r2Endpoint && r2Bucket && r2Key && r2Secret) {
-      // Upload to R2
-      const filename = `${tenantId}/${assetId}.mp4`;
-      const uploadRes = await fetch(`${r2Endpoint}/${r2Bucket}/${filename}`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": result.contentType,
-          "Authorization": `Basic ${Buffer.from(`${r2Key}:${r2Secret}`).toString("base64")}`,
-        },
-        body: result.buffer,
-      });
-
-      if (!uploadRes.ok) {
-        // Fallback to base64 if R2 upload fails
-        fileUrl = `data:${result.contentType};base64,${result.buffer.toString("base64")}`;
-      } else {
-        fileUrl = r2Public ? `${r2Public}/${filename}` : `${r2Endpoint}/${r2Bucket}/${filename}`;
-      }
-    } else {
-      // No R2 config — store as base64
-      fileUrl = `data:${result.contentType};base64,${result.buffer.toString("base64")}`;
-    }
+    const { uploadFile } = await import("../../storage");
+    const storageResult = await uploadFile({
+      data: result.buffer,
+      filename: `${assetId}.mp4`,
+      contentType: result.contentType,
+      tenantId,
+    });
 
     // Step 3: Store in content_assets → appears on client calendar
     const { error } = await supabase.from("content_assets").insert({
@@ -1139,13 +990,13 @@ app.post("/api/admin/generate-video/push", requireAuth, requireAdmin, async (c) 
       tenant_id: tenantId,
       title: title ?? "AI Generated Video",
       description: prompt ?? "",
-      file_url: fileUrl,
+      file_url: storageResult.url,
       content_type: "video",
-      file_size: result.buffer.length,
+      file_size: storageResult.size,
       mime_type: result.contentType,
       platform: "all",
       scheduled_date: today,
-      status: "ready",
+      status: "draft",
       created_at: new Date().toISOString(),
       created_by: c.get("session").sub,
     });
@@ -1166,7 +1017,7 @@ app.post("/api/admin/generate-video/push", requireAuth, requireAdmin, async (c) 
       data: {
         assetId,
         clientName: tenant?.name ?? "Client",
-        fileUrl,
+        fileUrl: storageResult.url,
       },
     });
   } catch (err: any) {
@@ -1196,7 +1047,7 @@ app.get("/api/cron/daily-blogs", async (c) => {
 
 // ── Blog automation config per client ───────────────────────────────
 
-app.post("/api/admin/clients/:id/blog-automation", requireAuth, requireAdmin, async (c) => {
+app.post("/api/admin/clients/:id/blog-automation", requireAuth, requireAdmin, requireAgencyAccess, async (c) => {
   const tenantId = c.req.param("id");
   const config = await c.req.json();
 
@@ -1213,7 +1064,7 @@ app.post("/api/admin/clients/:id/blog-automation", requireAuth, requireAdmin, as
   return c.json({ success: true, data: config });
 });
 
-app.get("/api/admin/clients/:id/blog-automation", requireAuth, requireAdmin, async (c) => {
+app.get("/api/admin/clients/:id/blog-automation", requireAuth, requireAdmin, requireAgencyAccess, async (c) => {
   const tenantId = c.req.param("id");
 
   const supabase = getAdminClient();
@@ -1228,9 +1079,12 @@ app.get("/api/admin/clients/:id/blog-automation", requireAuth, requireAdmin, asy
 
 // ── On-demand blog generation (admin triggers for a client) ─────────
 
-app.post("/api/admin/clients/:id/generate-blog", requireAuth, requireAdmin, async (c) => {
+app.post("/api/admin/clients/:id/generate-blog", requireAuth, requireAdmin, requireAgencyAccess, async (c) => {
   const tenantId = c.req.param("id");
   const { topic } = await c.req.json();
+
+  // Paywall: enforce monthly blog quota + trial/status gate.
+  await assertQuota(c, tenantId, "blogs");
 
   const { getClientBlogConfig, generateSingleBlog } = await import("../services/blog-automation");
   const config = await getClientBlogConfig(tenantId);
@@ -1268,10 +1122,13 @@ app.post("/api/client/generate-blog", requireAuth, async (c) => {
   const { topic } = await c.req.json();
 
   // Resolve tenant from session
-  const tenantId = getClientTenantId(c);
+  const tenantId = await getClientTenantId(c);
   if (!tenantId) {
     return c.json({ success: false, error: "No account found." }, 400);
   }
+
+  // Paywall: enforce monthly blog quota + trial/status gate.
+  await assertQuota(c, tenantId, "blogs");
 
   const { getClientBlogConfig, generateSingleBlog } = await import("../services/blog-automation");
   const config = await getClientBlogConfig(tenantId);
@@ -1306,7 +1163,7 @@ app.post("/api/client/generate-blog", requireAuth, async (c) => {
 // ── Client: blog auto-generation toggle ───────────────────────────
 
 app.get("/api/client/blog-auto-status", requireAuth, async (c) => {
-  const tenantId = getClientTenantId(c);
+  const tenantId = await getClientTenantId(c);
   if (!tenantId) return c.json({ success: true, data: { dailyAutoEnabled: false } });
 
   const supabase = getAdminClient();
@@ -1321,7 +1178,7 @@ app.get("/api/client/blog-auto-status", requireAuth, async (c) => {
 });
 
 app.post("/api/client/blog-auto-toggle", requireAuth, async (c) => {
-  const tenantId = getClientTenantId(c);
+  const tenantId = await getClientTenantId(c);
   if (!tenantId) return c.json({ success: false, error: "No account found." }, 400);
 
   const { enabled } = await c.req.json();
@@ -1412,7 +1269,7 @@ app.post("/api/billing/checkout", requireAuth, requireAdmin, async (c) => {
   const { priceId, tenantId, successUrl, cancelUrl } = body;
 
   const session = c.get("session");
-  const tenant = tenantService.getTenant(tenantId);
+  const tenant = await getTenantFromDB(tenantId);
 
   if (!tenant) {
     return c.json({ success: false, error: "Tenant not found." }, 404);
@@ -1421,9 +1278,9 @@ app.post("/api/billing/checkout", requireAuth, requireAdmin, async (c) => {
   const { billingService } = await import("../services/billing-service");
   const result = await billingService.createCheckoutSession({
     priceId,
-    customerEmail: tenant.email,
+    customerEmail: tenant.email ?? "",
     tenantId,
-    customerId: tenant.stripeCustomerId,
+    customerId: tenant.stripe_customer_id ?? undefined,
     successUrl: successUrl ?? `${process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000"}/admin/settings/billing?checkout=success`,
     cancelUrl: cancelUrl ?? `${process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000"}/admin/settings/billing?checkout=cancelled`,
   });
@@ -1441,14 +1298,14 @@ app.get("/api/billing/portal", requireAuth, requireAdmin, async (c) => {
     return c.json({ success: false, error: "tenantId query param is required." }, 400);
   }
 
-  const tenant = tenantService.getTenant(tenantId);
-  if (!tenant?.stripeCustomerId) {
+  const tenant = await getTenantFromDB(tenantId);
+  if (!tenant?.stripe_customer_id) {
     return c.json({ success: false, error: "No Stripe customer found. Subscribe first." }, 400);
   }
 
   const returnUrl = `${process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000"}/admin/settings/billing`;
   const { billingService } = await import("../services/billing-service");
-  const result = await billingService.createPortalSession(tenant.stripeCustomerId, returnUrl);
+  const result = await billingService.createPortalSession(tenant.stripe_customer_id, returnUrl);
 
   if (result.error) {
     return c.json({ success: false, error: result.error }, 500);
@@ -1463,8 +1320,8 @@ app.get("/api/billing/subscription", requireAuth, requireAdmin, async (c) => {
     return c.json({ success: false, error: "tenantId query param is required." }, 400);
   }
 
-  const tenant = tenantService.getTenant(tenantId);
-  if (!tenant) {
+  const ent = await getEntitlements(tenantId);
+  if (!ent) {
     return c.json({ success: false, error: "Tenant not found." }, 404);
   }
 
@@ -1474,10 +1331,13 @@ app.get("/api/billing/subscription", requireAuth, requireAdmin, async (c) => {
   return c.json({
     success: true,
     data: {
-      tier: tenant.tier,
-      status: tenant.status,
-      trialEndsAt: tenant.trialEndsAt,
-      features: tenant.features,
+      tier: ent.tier,
+      status: ent.tenant.status ?? "active",
+      trialEndsAt: ent.tenant.trial_ends_at ?? null,
+      trialExpired: ent.trialExpired,
+      blocked: ent.blocked,
+      blockedReason: ent.blockedReason,
+      features: ent.features,
       subscription: subInfo,
     },
   });
@@ -1485,18 +1345,527 @@ app.get("/api/billing/subscription", requireAuth, requireAdmin, async (c) => {
 
 // ── API key management (admin only) ──────────────────────────────────
 
-app.post("/api/admin/clients/:id/api-key", requireAuth, requireAdmin, async (c) => {
+app.post("/api/admin/clients/:id/api-key", requireAuth, requireAdmin, requireAgencyAccess, async (c) => {
   const tenantId = c.req.param("id");
   const { generateApiKey } = await import("../services/blog-api-service");
   const key = await generateApiKey(tenantId);
   return c.json({ success: true, data: { apiKey: key } });
 });
 
-app.get("/api/admin/clients/:id/api-key", requireAuth, requireAdmin, async (c) => {
+app.get("/api/admin/clients/:id/api-key", requireAuth, requireAdmin, requireAgencyAccess, async (c) => {
   const tenantId = c.req.param("id");
   const { getApiKey } = await import("../services/blog-api-service");
   const key = await getApiKey(tenantId);
   return c.json({ success: true, data: { apiKey: key } });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// TEAM MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════
+
+app.get("/api/admin/team", requireAuth, requireAdmin, async (c) => {
+  const session = c.get("session");
+  const ownerId = await resolveAgencyOwnerId(session.sub);
+  const team = await listTeam(ownerId);
+  return c.json({ success: true, data: team });
+});
+
+app.post("/api/admin/team", requireAuth, requireAdmin, async (c) => {
+  const session = c.get("session");
+  const body = await validate(c, schemas.teamInvite);
+
+  if (body.role === "owner") {
+    return c.json({ success: false, error: "There can only be one agency owner." }, 400);
+  }
+
+  const ownerId = await resolveAgencyOwnerId(session.sub);
+  try {
+    const member = await createMember({
+      ownerId,
+      name: body.name,
+      email: body.email,
+      role: body.role,
+      password: body.password,
+    });
+    return c.json({ success: true, data: member }, 201);
+  } catch (err: any) {
+    return c.json({ success: false, error: err.message }, 400);
+  }
+});
+
+app.patch("/api/admin/team/:userId", requireAuth, requireAdmin, async (c) => {
+  const session = c.get("session");
+  const userId = c.req.param("userId");
+  const body = await validate(c, schemas.teamUpdate);
+
+  if (body.role === "owner") {
+    return c.json({ success: false, error: "Cannot assign owner role." }, 400);
+  }
+
+  const ownerId = await resolveAgencyOwnerId(session.sub);
+  const supabase = getAdminClient();
+  const { data: member } = await supabase
+    .from("users")
+    .select("agency_id")
+    .eq("id", userId)
+    .maybeSingle();
+  if (!member || member.agency_id !== ownerId) {
+    return c.json({ success: false, error: "Team member not found." }, 404);
+  }
+
+  const ok = await updateMemberRole(userId, body.role);
+  return ok
+    ? c.json({ success: true })
+    : c.json({ success: false, error: "Update failed." }, 500);
+});
+
+app.delete("/api/admin/team/:userId", requireAuth, requireAdmin, async (c) => {
+  const session = c.get("session");
+  const userId = c.req.param("userId");
+  const ownerId = await resolveAgencyOwnerId(session.sub);
+
+  const supabase = getAdminClient();
+  const { data: member } = await supabase
+    .from("users")
+    .select("agency_id")
+    .eq("id", userId)
+    .maybeSingle();
+  if (!member || member.agency_id !== ownerId) {
+    return c.json({ success: false, error: "Team member not found." }, 404);
+  }
+
+  const ok = await removeMember(userId);
+  return ok
+    ? c.json({ success: true })
+    : c.json({ success: false, error: "Remove failed." }, 500);
+});
+
+// ── Content assignment (team member → content asset) ────────────────
+
+app.post("/api/admin/content/:id/assign", requireAuth, requireAdmin, async (c) => {
+  const assetId = c.req.param("id");
+  const body = await validate(c, schemas.assignContent);
+  const { assigneeId } = body;
+  const session = c.get("session");
+  const supabase = getAdminClient();
+
+  const { data: asset } = await supabase
+    .from("content_assets")
+    .select("tenant_id")
+    .eq("id", assetId)
+    .maybeSingle();
+  if (!asset) {
+    return c.json({ success: false, error: "Content not found." }, 404);
+  }
+
+  const ownerId = await resolveAgencyOwnerId(session.sub);
+  const { data: tenant } = await supabase
+    .from("tenants")
+    .select("agency_id")
+    .eq("id", asset.tenant_id)
+    .maybeSingle();
+  if (!tenant || tenant.agency_id !== ownerId) {
+    return c.json({ success: false, error: "Access denied." }, 403);
+  }
+
+  const { error } = await supabase
+    .from("content_assets")
+    .update({ assignee_id: assigneeId })
+    .eq("id", assetId);
+  if (error) {
+    return c.json({ success: false, error: "Update failed." }, 500);
+  }
+  return c.json({ success: true, data: { id: assetId, assigneeId } });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// CLIENT BRIEF (requirements) + CONTENT STRATEGY
+// ═══════════════════════════════════════════════════════════════════════
+
+app.get("/api/admin/clients/:id/brief", requireAuth, requireAdmin, requireAgencyAccess, async (c) => {
+  const tenantId = c.req.param("id");
+  const supabase = getAdminClient();
+  const { data } = await supabase
+    .from("client_briefs")
+    .select("*")
+    .eq("tenant_id", tenantId)
+    .maybeSingle();
+  return c.json({ success: true, data: data ?? null });
+});
+
+app.put("/api/admin/clients/:id/brief", requireAuth, requireAdmin, requireAgencyAccess, async (c) => {
+  const tenantId = c.req.param("id");
+  const body = await validate(c, schemas.brief);
+  const supabase = getAdminClient();
+  const now = new Date().toISOString();
+
+  const payload = {
+    tenant_id: tenantId,
+    brand_voice: body.brandVoice ?? null,
+    target_audience: body.targetAudience ?? null,
+    goals: body.goals ?? null,
+    content_pillars: body.contentPillars ?? [],
+    platforms: body.platforms ?? [],
+    style_guidelines: body.styleGuidelines ?? {},
+    notes: body.notes ?? null,
+    status: body.status ?? "active",
+    updated_at: now,
+  };
+
+  const { data, error } = await supabase
+    .from("client_briefs")
+    .upsert(payload, { onConflict: "tenant_id" })
+    .select()
+    .maybeSingle();
+
+  if (error) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+  return c.json({ success: true, data: data ?? payload });
+});
+
+app.get("/api/admin/clients/:id/strategies", requireAuth, requireAdmin, requireAgencyAccess, async (c) => {
+  const tenantId = c.req.param("id");
+  const supabase = getAdminClient();
+  const { data } = await supabase
+    .from("content_strategies")
+    .select("*")
+    .eq("tenant_id", tenantId)
+    .order("created_at", { ascending: false });
+  return c.json({ success: true, data: data ?? [] });
+});
+
+app.post("/api/admin/clients/:id/strategies", requireAuth, requireAdmin, requireAgencyAccess, async (c) => {
+  const tenantId = c.req.param("id");
+  const body = await validate(c, schemas.strategy);
+  const supabase = getAdminClient();
+  const now = new Date().toISOString();
+  const id = `strategy_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  const payload = {
+    id,
+    tenant_id: tenantId,
+    name: body.name,
+    pillars_json: body.pillars ?? [],
+    format_mix_json: body.formatMix ?? {},
+    cadence_json: body.cadence ?? {},
+    timeline_start: body.timelineStart ?? null,
+    timeline_end: body.timelineEnd ?? null,
+    status: body.status ?? "active",
+    created_at: now,
+    updated_at: now,
+  };
+
+  const { error } = await supabase.from("content_strategies").insert(payload);
+  if (error) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+  return c.json({ success: true, data: payload }, 201);
+});
+
+app.patch("/api/admin/strategies/:id", requireAuth, requireAdmin, async (c) => {
+  const strategyId = c.req.param("id");
+  const body = await validate(c, schemas.strategy);
+  const supabase = getAdminClient();
+
+  const { data: existing } = await supabase
+    .from("content_strategies")
+    .select("tenant_id")
+    .eq("id", strategyId)
+    .maybeSingle();
+  if (!existing) {
+    return c.json({ success: false, error: "Strategy not found." }, 404);
+  }
+
+  const session = c.get("session");
+  const ownerId = await resolveAgencyOwnerId(session.sub);
+  const { data: tenant } = await supabase
+    .from("tenants")
+    .select("agency_id")
+    .eq("id", existing.tenant_id)
+    .maybeSingle();
+  if (!tenant || tenant.agency_id !== ownerId) {
+    return c.json({ success: false, error: "Access denied." }, 403);
+  }
+
+  const updates: Record<string, any> = { updated_at: new Date().toISOString() };
+  if (body.name !== undefined) updates.name = body.name;
+  if (body.pillars !== undefined) updates.pillars_json = body.pillars;
+  if (body.formatMix !== undefined) updates.format_mix_json = body.formatMix;
+  if (body.cadence !== undefined) updates.cadence_json = body.cadence;
+  if (body.timelineStart !== undefined) updates.timeline_start = body.timelineStart;
+  if (body.timelineEnd !== undefined) updates.timeline_end = body.timelineEnd;
+  if (body.status !== undefined) updates.status = body.status;
+
+  const { error } = await supabase
+    .from("content_strategies")
+    .update(updates)
+    .eq("id", strategyId);
+  if (error) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+  return c.json({ success: true });
+});
+
+app.delete("/api/admin/strategies/:id", requireAuth, requireAdmin, async (c) => {
+  const strategyId = c.req.param("id");
+  const supabase = getAdminClient();
+
+  const { data: existing } = await supabase
+    .from("content_strategies")
+    .select("tenant_id")
+    .eq("id", strategyId)
+    .maybeSingle();
+  if (!existing) {
+    return c.json({ success: false, error: "Strategy not found." }, 404);
+  }
+
+  const session = c.get("session");
+  const ownerId = await resolveAgencyOwnerId(session.sub);
+  const { data: tenant } = await supabase
+    .from("tenants")
+    .select("agency_id")
+    .eq("id", existing.tenant_id)
+    .maybeSingle();
+  if (!tenant || tenant.agency_id !== ownerId) {
+    return c.json({ success: false, error: "Access denied." }, 403);
+  }
+
+  await supabase.from("content_strategies").delete().eq("id", strategyId);
+  return c.json({ success: true });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// CLIENT APPROVAL LOOP
+// ═══════════════════════════════════════════════════════════════════════
+
+app.get("/api/client/content/:id", requireAuth, async (c) => {
+  const assetId = c.req.param("id");
+  const tenantId = await getClientTenantId(c);
+  if (!tenantId) {
+    return c.json({ success: false, error: "No account found." }, 400);
+  }
+
+  const supabase = getAdminClient();
+  const { data } = await supabase
+    .from("content_assets")
+    .select("*")
+    .eq("id", assetId)
+    .eq("tenant_id", tenantId)
+    .maybeSingle();
+  if (!data) {
+    return c.json({ success: false, error: "Content not found." }, 404);
+  }
+  return c.json({ success: true, data });
+});
+
+app.post("/api/client/content/:id/approve", requireAuth, async (c) => {
+  const assetId = c.req.param("id");
+  const tenantId = await getClientTenantId(c);
+  if (!tenantId) {
+    return c.json({ success: false, error: "No account found." }, 400);
+  }
+
+  const supabase = getAdminClient();
+  const { data: asset } = await supabase
+    .from("content_assets")
+    .select("status")
+    .eq("id", assetId)
+    .eq("tenant_id", tenantId)
+    .maybeSingle();
+  if (!asset) {
+    return c.json({ success: false, error: "Content not found." }, 404);
+  }
+  if (asset.status !== "approved") {
+    return c.json({ success: false, error: "This content is not awaiting your approval." }, 400);
+  }
+
+  const { error } = await supabase
+    .from("content_assets")
+    .update({ status: "delivered", reviewed_at: new Date().toISOString() })
+    .eq("id", assetId);
+  if (error) {
+    return c.json({ success: false, error: "Update failed." }, 500);
+  }
+  return c.json({ success: true, data: { id: assetId, status: "delivered" } });
+});
+
+app.post("/api/client/content/:id/request-changes", requireAuth, async (c) => {
+  const assetId = c.req.param("id");
+  const tenantId = await getClientTenantId(c);
+  if (!tenantId) {
+    return c.json({ success: false, error: "No account found." }, 400);
+  }
+
+  const body = await validate(c, schemas.requestChanges);
+  const session = c.get("session");
+  const supabase = getAdminClient();
+
+  const { data: asset } = await supabase
+    .from("content_assets")
+    .select("status")
+    .eq("id", assetId)
+    .eq("tenant_id", tenantId)
+    .maybeSingle();
+  if (!asset) {
+    return c.json({ success: false, error: "Content not found." }, 404);
+  }
+  if (asset.status !== "approved" && asset.status !== "delivered") {
+    return c.json({ success: false, error: "This content is not awaiting your approval." }, 400);
+  }
+
+  const now = new Date().toISOString();
+  const commentId = `comment_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  await supabase
+    .from("content_assets")
+    .update({ status: "revision_requested", review_note: body.comment, reviewed_at: now })
+    .eq("id", assetId);
+
+  // Persist the comment (best-effort — requires migration-003 asset_comments table).
+  try {
+    await supabase.from("asset_comments").insert({
+      id: commentId,
+      asset_id: assetId,
+      tenant_id: tenantId,
+      author_id: session.sub,
+      author_role: "client",
+      body: body.comment,
+      created_at: now,
+    });
+  } catch (err: any) {
+    console.error("[api] Failed to store approval comment:", err?.message ?? err);
+  }
+
+  return c.json({ success: true, data: { id: assetId, status: "revision_requested" } });
+});
+
+app.get("/api/client/content/:id/comments", requireAuth, async (c) => {
+  const assetId = c.req.param("id");
+  const tenantId = await getClientTenantId(c);
+  if (!tenantId) {
+    return c.json({ success: false, error: "No account found." }, 400);
+  }
+
+  const supabase = getAdminClient();
+  const { data } = await supabase
+    .from("asset_comments")
+    .select("*")
+    .eq("asset_id", assetId)
+    .eq("tenant_id", tenantId)
+    .order("created_at", { ascending: true });
+  return c.json({ success: true, data: data ?? [] });
+});
+
+app.post("/api/client/content/:id/comments", requireAuth, async (c) => {
+  const assetId = c.req.param("id");
+  const tenantId = await getClientTenantId(c);
+  if (!tenantId) {
+    return c.json({ success: false, error: "No account found." }, 400);
+  }
+
+  const body = await validate(c, schemas.comment);
+  const session = c.get("session");
+  const supabase = getAdminClient();
+  const now = new Date().toISOString();
+  const id = `comment_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  const { error } = await supabase.from("asset_comments").insert({
+    id,
+    asset_id: assetId,
+    tenant_id: tenantId,
+    author_id: session.sub,
+    author_role: "client",
+    body: body.body,
+    created_at: now,
+  });
+  if (error) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+  return c.json({
+    success: true,
+    data: { id, assetId, tenantId, authorRole: "client", body: body.body, createdAt: now },
+  }, 201);
+});
+
+// ── Admin view of the approval thread ───────────────────────────────
+
+app.get("/api/admin/content/:id/comments", requireAuth, requireAdmin, async (c) => {
+  const assetId = c.req.param("id");
+  const session = c.get("session");
+  const supabase = getAdminClient();
+
+  const { data: asset } = await supabase
+    .from("content_assets")
+    .select("tenant_id")
+    .eq("id", assetId)
+    .maybeSingle();
+  if (!asset) {
+    return c.json({ success: false, error: "Content not found." }, 404);
+  }
+
+  const ownerId = await resolveAgencyOwnerId(session.sub);
+  const { data: tenant } = await supabase
+    .from("tenants")
+    .select("agency_id")
+    .eq("id", asset.tenant_id)
+    .maybeSingle();
+  if (!tenant || tenant.agency_id !== ownerId) {
+    return c.json({ success: false, error: "Access denied." }, 403);
+  }
+
+  const { data } = await supabase
+    .from("asset_comments")
+    .select("*")
+    .eq("asset_id", assetId)
+    .order("created_at", { ascending: true });
+  return c.json({ success: true, data: data ?? [] });
+});
+
+app.post("/api/admin/content/:id/comments", requireAuth, requireAdmin, async (c) => {
+  const assetId = c.req.param("id");
+  const body = await validate(c, schemas.comment);
+  const session = c.get("session");
+  const supabase = getAdminClient();
+
+  const { data: asset } = await supabase
+    .from("content_assets")
+    .select("tenant_id")
+    .eq("id", assetId)
+    .maybeSingle();
+  if (!asset) {
+    return c.json({ success: false, error: "Content not found." }, 404);
+  }
+
+  const ownerId = await resolveAgencyOwnerId(session.sub);
+  const { data: tenant } = await supabase
+    .from("tenants")
+    .select("agency_id")
+    .eq("id", asset.tenant_id)
+    .maybeSingle();
+  if (!tenant || tenant.agency_id !== ownerId) {
+    return c.json({ success: false, error: "Access denied." }, 403);
+  }
+
+  const now = new Date().toISOString();
+  const id = `comment_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  const { error } = await supabase.from("asset_comments").insert({
+    id,
+    asset_id: assetId,
+    tenant_id: asset.tenant_id,
+    author_id: session.sub,
+    author_role: "admin",
+    body: body.body,
+    created_at: now,
+  });
+  if (error) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+  return c.json({
+    success: true,
+    data: { id, assetId, tenantId: asset.tenant_id, authorRole: "admin", body: body.body, createdAt: now },
+  }, 201);
 });
 
 // ── Export ───────────────────────────────────────────────────────────
@@ -1577,18 +1946,6 @@ export async function initUserStore(): Promise<void> {
       }
     }
 
-    // Seed content from Supabase JS client (REST adapter may fail on Vercel).
-    const { data: contentItems } = await supabase
-      .from("content_items")
-      .select("*")
-      .order("created_at", { ascending: false });
-    if (contentItems) {
-      const { contentService } = await import("../services/content-service");
-      for (const c of contentItems) {
-        contentService.seedContent(c as Record<string, unknown>);
-      }
-      console.log(`[initUserStore] Seeded ${contentItems.length} content items`);
-    }
   } catch (err: any) {
     console.error("[initUserStore] Failed to load from Supabase:", err.message);
   }

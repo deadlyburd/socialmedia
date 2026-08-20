@@ -9,6 +9,7 @@ import {
   Settings,
   Upload,
   Users,
+  UserPlus,
   Sparkles,
   Video,
 } from "lucide-react";
@@ -140,6 +141,7 @@ export function AdminSidebar() {
 const navItems = [
   { name: "Dashboard",  href: "/admin/dashboard",  icon: LayoutDashboard },
   { name: "Clients",    href: "/admin/clients",   icon: Users },
+  { name: "Team",       href: "/admin/team",      icon: UserPlus },
   { name: "Upload",     href: "/admin/upload",  icon: Upload },
   { name: "Calendar",   href: "/admin/dashboard", icon: CalendarDays },
   { name: "Generate Video", href: "/admin/generate-video", icon: Video },

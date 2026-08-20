@@ -4,14 +4,12 @@
  */
 
 import { Hono } from "hono";
-import { startElizaOSBridge } from "@/lib/saas-core/services/elizaos-bridge";
 
 // ── Lazy init — resilient to import failures ──────────────────────────
 
 let saasRouter: any = null;
 let initError: string | null = null;
 let initialized = false;
-let bridgeStarted = false;
 
 async function ensureInit(): Promise<void> {
   if (initialized) return;
@@ -28,19 +26,6 @@ async function ensureInit(): Promise<void> {
     } catch (err: any) {
       initError = err.message ?? "Unknown import error";
       console.error("[api] Failed to load saas-core router:", initError);
-    }
-  }
-
-  // Start ElizaOS bridge (Realtime listener for content approvals)
-  if (!bridgeStarted) {
-    try {
-      await startElizaOSBridge();
-      bridgeStarted = true;
-    } catch (err: any) {
-      console.warn(
-        "[api] ElizaOS bridge failed to start:",
-        err.message ?? err,
-      );
     }
   }
 

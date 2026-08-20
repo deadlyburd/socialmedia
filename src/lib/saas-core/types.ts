@@ -506,6 +506,18 @@ export const TIER_PRICING: Record<SubscriptionTier, number> = {
 /** User role for agency platform. */
 export type UserRole = "admin" | "client";
 
+/** Agency-internal role for team members (admin-side users). */
+export type AgencyRole = "owner" | "manager" | "creator" | "editor";
+
+/** A member of an agency team. */
+export interface TeamMember {
+  userId: string;
+  agencyId: string;
+  name: string;
+  email: string;
+  role: AgencyRole;
+}
+
 /** Content types the agency can upload. */
 export type ContentAssetType =
   | "video"
@@ -513,10 +525,20 @@ export type ContentAssetType =
   | "carousel"
   | "reel"
   | "story"
-  | "feed_post";
+  | "feed_post"
+  | "blog";
 
-/** Lifecycle status of an uploaded content asset. */
-export type ContentAssetStatus = "processing" | "ready" | "downloaded" | "posted";
+/** Full production + delivery lifecycle of a content asset. */
+export type ContentAssetStatus =
+  | "planned"
+  | "draft"
+  | "in_review"
+  | "revision_requested"
+  | "approved"
+  | "delivered"
+  | "downloaded"
+  | "posted"
+  | "rejected";
 
 /** A content asset uploaded by an admin for a client. */
 export interface ContentAsset {
@@ -533,8 +555,52 @@ export interface ContentAsset {
   platform: string;
   scheduledDate: string;
   status: ContentAssetStatus;
+  /** The actual post caption (distinct from `description`). */
+  caption: string | null;
+  hashtags: string[];
+  /** Multi-image carousel items (optional). */
+  carouselItems: string[] | null;
+  /** Team member assigned to produce this content. */
+  assigneeId: string | null;
+  reviewedBy: string | null;
+  reviewedAt: string | null;
+  reviewNote: string | null;
+  downloadedAt: string | null;
+  postedAt: string | null;
+  postedUrl: string | null;
   createdAt: string;
   createdBy: string;
+}
+
+/** Requirements / brief for one business (1:1 with tenant). */
+export interface ClientBrief {
+  id: string;
+  tenantId: string;
+  brandVoice: string | null;
+  targetAudience: string | null;
+  goals: string | null;
+  contentPillars: Array<{ name: string; share?: number }>;
+  platforms: Array<{ platform: string; handle?: string; cadence?: string }>;
+  styleGuidelines: Record<string, unknown>;
+  notes: string | null;
+  status: "draft" | "active" | "archived";
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Content strategy / plan derived from a brief (1:many per tenant). */
+export interface ContentStrategy {
+  id: string;
+  tenantId: string;
+  name: string;
+  pillars: Array<{ name: string; share?: number }>;
+  formatMix: Record<string, number>;
+  cadence: Record<string, string>;
+  timelineStart: string | null;
+  timelineEnd: string | null;
+  status: "active" | "archived";
+  createdAt: string;
+  updatedAt: string;
 }
 
 /** Client info returned to admin. */
@@ -555,4 +621,15 @@ export interface PlatformConnectionFull extends PlatformConnection {
   refreshToken: string | null;
   tokenExpiresAt: string | null;
   platformUserId: string | null;
+}
+
+/** A comment in a content asset's approval thread. */
+export interface AssetComment {
+  id: string;
+  assetId: string;
+  tenantId: string;
+  authorId: string | null;
+  authorRole: "admin" | "client";
+  body: string;
+  createdAt: string;
 }

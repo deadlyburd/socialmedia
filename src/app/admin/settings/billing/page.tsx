@@ -13,6 +13,9 @@ interface SubscriptionData {
   tier: SubscriptionTier;
   status: string;
   trialEndsAt: string | null;
+  trialExpired?: boolean;
+  blocked?: boolean;
+  blockedReason?: string | null;
   features: TenantFeatures;
   subscription: {
     status: string;
@@ -43,6 +46,7 @@ export default function BillingSettingsPage() {
   const [loading, setLoading] = useState(true);
   const [checkingOut, setCheckingOut] = useState<string | null>(null);
   const [tenantId, setTenantId] = useState<string | null>(null);
+  const [clients, setClients] = useState<{ tenantId: string; businessName: string }[]>([]);
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated) { router.replace("/login"); return; }
@@ -66,27 +70,30 @@ export default function BillingSettingsPage() {
     }
   }, []);
 
-  async function fetchSubscription() {
+  async function fetchSubscription(selectedTenantId?: string) {
     try {
-      // First, get the admin's tenants
+      // Billing is per-client: read the admin's clients (each has a tenantId).
       const clientsRes = await fetch("/api/admin/clients", { credentials: "include" });
-      // Fallback: get tenants list
-      const tenantsRes = await fetch("/api/tenants", { credentials: "include" });
-      const tenantsData = await tenantsRes.json();
+      const clientsData = await clientsRes.json();
+      const clientList = clientsData.success ? (clientsData.data ?? []) : [];
+      setClients(clientList.map((c: any) => ({
+        tenantId: c.tenantId,
+        businessName: c.businessName ?? c.name ?? c.email,
+      })));
 
-      if (tenantsData.success && tenantsData.data?.length > 0) {
-        // For billing, use the first tenant or the admin's own tenant
-        // Admin billing is per-agency, so we use the first tenant
-        const tid = tenantsData.data[0].id;
-        setTenantId(tid);
+      const tid = selectedTenantId ?? (clientList.length > 0 ? clientList[0].tenantId : null);
+      setTenantId(tid);
+      if (!tid) {
+        setSubscription(null);
+        return;
+      }
 
-        const res = await fetch(`/api/billing/subscription?tenantId=${tid}`, {
-          credentials: "include",
-        });
-        const data = await res.json();
-        if (data.success) {
-          setSubscription(data.data);
-        }
+      const res = await fetch(`/api/billing/subscription?tenantId=${tid}`, {
+        credentials: "include",
+      });
+      const data = await res.json();
+      if (data.success) {
+        setSubscription(data.data);
       }
     } catch (err) {
       console.error("Failed to fetch subscription:", err);
@@ -168,6 +175,32 @@ export default function BillingSettingsPage() {
           Manage your plan and payment methods
         </p>
       </div>
+
+      {clients.length > 1 && (
+        <div>
+          <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2 block">Client</label>
+          <select
+            value={tenantId ?? ""}
+            onChange={(e) => { setLoading(true); fetchSubscription(e.target.value); }}
+            className="w-full max-w-xs h-10 rounded-xl border border-black/10 px-3 text-sm bg-white"
+          >
+            {clients.map((c) => (
+              <option key={c.tenantId} value={c.tenantId}>{c.businessName}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      {subscription?.blocked && (
+        <div className="bg-amber-100/70 text-amber-800 rounded-[20px] p-4 text-sm">
+          {subscription.blockedReason ?? "This account is not active."}
+        </div>
+      )}
+      {subscription?.trialExpired && (
+        <div className="bg-blue-100/70 text-blue-800 rounded-[20px] p-4 text-sm">
+          Trial has ended. Upgrade to keep posting.
+        </div>
+      )}
 
       {/* Current Plan Card */}
       <div className="bg-white/50 rounded-[24px] p-8">

@@ -37,6 +37,8 @@ export default function ClientCalendarPage() {
   const [loading, setLoading] = useState(true);
   const [selectedItem, setSelectedItem] = useState<ContentItem | null>(null);
   const [posting, setPosting] = useState(false);
+  const [approvalComment, setApprovalComment] = useState("");
+  const [approving, setApproving] = useState(false);
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated) { router.replace("/login"); return; }
@@ -60,7 +62,7 @@ export default function ClientCalendarPage() {
             contentType: item.content_type ?? item.contentType ?? "feed_post",
             scheduledDate: item.scheduled_date ?? item.scheduledDate ?? "",
             platform: item.platform ?? "all",
-            status: item.status ?? "ready",
+            status: item.status ?? "delivered",
             mimeType: item.mime_type ?? item.mimeType ?? null,
           }));
           setItems(normalized);
@@ -131,18 +133,69 @@ export default function ClientCalendarPage() {
     }
   };
 
+  const handleApprove = useCallback(async (item: ContentItem) => {
+    setApproving(true);
+    try {
+      const res = await fetch(`/api/client/content/${item.id}/approve`, {
+        method: "POST",
+        credentials: "include",
+      });
+      const data = await res.json();
+      if (data.success) {
+        setItems(prev => prev.map(i => i.id === item.id ? { ...i, status: "delivered" } : i));
+        setSelectedItem(prev => prev?.id === item.id ? { ...prev, status: "delivered" } : prev);
+        toast.success("Approved! Content is now ready to post.");
+      } else {
+        toast.error(data.error ?? "Approval failed");
+      }
+    } catch {
+      toast.error("Network error");
+    } finally {
+      setApproving(false);
+    }
+  }, []);
+
+  const handleRequestChanges = useCallback(async (item: ContentItem) => {
+    if (!approvalComment.trim()) {
+      toast.error("Add a comment describing the changes needed");
+      return;
+    }
+    setApproving(true);
+    try {
+      const res = await fetch(`/api/client/content/${item.id}/request-changes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ comment: approvalComment.trim() }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setItems(prev => prev.map(i => i.id === item.id ? { ...i, status: "revision_requested" } : i));
+        setSelectedItem(prev => prev?.id === item.id ? { ...prev, status: "revision_requested" } : prev);
+        setApprovalComment("");
+        toast.success("Changes requested — your agency will revise this.");
+      } else {
+        toast.error(data.error ?? "Request failed");
+      }
+    } catch {
+      toast.error("Network error");
+    } finally {
+      setApproving(false);
+    }
+  }, [approvalComment]);
+
   const events: CalendarEvent[] = useMemo(() =>
     items.map(item => ({
       id: item.id,
       date: item.scheduled_date ?? item.scheduledDate,
       title: item.title,
       platform: item.platform,
-      status: (item.status === "posted" ? "published" : item.status === "ready" ? "scheduled" : "pending") as CalendarEvent["status"],
+      status: (item.status === "posted" ? "published" : item.status === "delivered" ? "scheduled" : "pending") as CalendarEvent["status"],
       type: item.contentType === "video" || item.contentType === "reel" ? "reel" : item.contentType === "carousel" ? "carousel" : "feed_post",
     })),
   [items]);
 
-  const scheduledCount = items.filter(i => i.status === "ready").length;
+  const scheduledCount = items.filter(i => i.status === "delivered").length;
   const postedCount = items.filter(i => i.status === "posted").length;
 
   if (isLoading || loading) {
@@ -236,7 +289,11 @@ export default function ClientCalendarPage() {
           </div>
 
           {/* Media preview */}
-          {selectedItem.contentType === "video" || selectedItem.contentType === "reel" ? (
+          {selectedItem.contentType === "blog" ? (
+            <div className="w-full max-h-96 overflow-y-auto rounded-2xl bg-white/60 p-5 mb-6 text-sm whitespace-pre-wrap leading-relaxed">
+              {selectedItem.fileUrl || selectedItem.description}
+            </div>
+          ) : selectedItem.contentType === "video" || selectedItem.contentType === "reel" ? (
             <video
               src={selectedItem.fileUrl}
               controls
@@ -268,8 +325,38 @@ export default function ClientCalendarPage() {
             </div>
           </div>
 
+          {selectedItem.status === "approved" && (
+            <div className="mb-6 p-5 rounded-2xl bg-white/70 border border-black/5">
+              <p className="text-sm font-medium mb-3">This content needs your approval before you can post it.</p>
+              <textarea
+                value={approvalComment}
+                onChange={(e) => setApprovalComment(e.target.value)}
+                placeholder="Request changes (leave a comment for your agency)…"
+                className="w-full min-h-[64px] rounded-2xl bg-white/60 border border-black/10 px-4 py-3 text-sm outline-none focus:border-black/30 resize-y"
+              />
+              <div className="flex gap-3 mt-3">
+                <Button
+                  onClick={() => handleApprove(selectedItem)}
+                  disabled={approving}
+                  className="rounded-full bg-foreground hover:bg-foreground/90 text-background h-10 px-5 text-sm"
+                >
+                  {approving ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : null}
+                  Approve
+                </Button>
+                <Button
+                  onClick={() => handleRequestChanges(selectedItem)}
+                  disabled={approving}
+                  variant="outline"
+                  className="rounded-full border-black/10 h-10 px-5 text-sm"
+                >
+                  Request changes
+                </Button>
+              </div>
+            </div>
+          )}
+
           {/* Action buttons */}
-          <div className="flex gap-3 pt-6 border-t border-black/5">
+          <div className={`flex gap-3 pt-6 border-t border-black/5 ${selectedItem.status === "approved" ? "hidden" : ""}`}>
             <button
               onClick={() => handleDownload(selectedItem)}
               className="inline-flex items-center rounded-full bg-foreground hover:bg-foreground/90 text-background h-10 px-5 text-sm font-medium"
@@ -302,7 +389,7 @@ export default function ClientCalendarPage() {
             </a>
           </div>
 
-          {selectedItem.status === "ready" && accounts.filter(a => a.connected).length === 0 && (
+          {selectedItem.status === "delivered" && accounts.filter(a => a.connected).length === 0 && (
             <p className="text-xs text-muted-foreground mt-4 pt-4 border-t border-black/5">
               <button
                 onClick={() => router.push("/client/accounts")}

@@ -7,7 +7,9 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import CalendarView, { type CalendarEvent } from "@/components/ui/calendar-view/calendar-view";
 import { BlogAutomationSettings } from "@/components/blog-automation-settings";
-import { ArrowLeft, Download, Video, ImageIcon, Camera, Loader2, CalendarDays, Zap } from "lucide-react";
+import { ClientBriefStrategy } from "@/components/client-brief-strategy";
+import { ArrowLeft, Download, Video, ImageIcon, Camera, Loader2, CalendarDays, Zap, FileText } from "lucide-react";
+import { toast } from "sonner";
 
 interface ContentItem {
   id: string;
@@ -20,6 +22,8 @@ interface ContentItem {
   platform: string;
   status: string;
   mimeType: string | null;
+  reviewNote: string | null;
+  assigneeId: string | null;
 }
 
 export default function AdminClientCalendarPage() {
@@ -32,6 +36,8 @@ export default function AdminClientCalendarPage() {
   const [loading, setLoading] = useState(true);
   const [clientName, setClientName] = useState("");
   const [selectedItem, setSelectedItem] = useState<ContentItem | null>(null);
+  const [note, setNote] = useState("");
+  const [team, setTeam] = useState<{ userId: string; name: string; role: string }[]>([]);
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated) { router.replace("/login"); return; }
@@ -46,6 +52,12 @@ export default function AdminClientCalendarPage() {
           if (client) setClientName(client.businessName ?? client.name);
         }
       })
+      .catch(() => {});
+
+    // Load team for content assignment
+    fetch("/api/admin/team", { credentials: "include" })
+      .then(r => r.json())
+      .then(d => { if (d.success) setTeam(d.data ?? []); })
       .catch(() => {});
 
     // Load content
@@ -63,8 +75,10 @@ export default function AdminClientCalendarPage() {
             contentType: item.content_type ?? item.contentType ?? "feed_post",
             scheduledDate: item.scheduled_date ?? item.scheduledDate ?? "",
             platform: item.platform ?? "all",
-            status: item.status ?? "ready",
+            status: item.status ?? "delivered",
             mimeType: item.mime_type ?? item.mimeType ?? null,
+            reviewNote: item.review_note ?? null,
+            assigneeId: item.assignee_id ?? null,
           }));
           setItems(normalized);
         }
@@ -79,17 +93,63 @@ export default function AdminClientCalendarPage() {
       date: item.scheduled_date ?? item.scheduledDate,
       title: item.title,
       platform: item.platform,
-      status: (item.status === "posted" ? "published" : item.status === "ready" ? "scheduled" : "pending") as CalendarEvent["status"],
+      status: (item.status === "posted" ? "published" : item.status === "delivered" ? "scheduled" : "pending") as CalendarEvent["status"],
       type: item.contentType === "video" || item.contentType === "reel" ? "reel" : item.contentType === "carousel" ? "carousel" : "feed_post",
     })),
   [items]);
 
   const stats = useMemo(() => ({
     total: items.length,
-    ready: items.filter(i => i.status === "ready").length,
+    delivered: items.filter(i => i.status === "delivered").length,
     downloaded: items.filter(i => i.status === "downloaded").length,
     posted: items.filter(i => i.status === "posted").length,
   }), [items]);
+
+  const updateStatus = async (newStatus: string) => {
+    if (!selectedItem) return;
+    const trimmed = note.trim();
+    try {
+      const res = await fetch(`/api/admin/content/${selectedItem.id}/status`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ status: newStatus, note: trimmed || undefined }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        const patch: Partial<ContentItem> = { status: newStatus };
+        if (trimmed) patch.reviewNote = trimmed;
+        setItems(prev => prev.map(i => i.id === selectedItem.id ? { ...i, ...patch } : i));
+        setSelectedItem(prev => prev?.id === selectedItem.id ? { ...prev, ...patch } : prev);
+        setNote("");
+        toast.success("Status updated");
+      } else {
+        toast.error(data.error ?? "Update failed");
+      }
+    } catch {
+      toast.error("Network error");
+    }
+  };
+
+  const assignTo = async (assigneeId: string | null) => {
+    if (!selectedItem) return;
+    try {
+      const res = await fetch(`/api/admin/content/${selectedItem.id}/assign`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ assigneeId }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        toast.success(assigneeId ? "Assignee updated" : "Assignee cleared");
+      } else {
+        toast.error(data.error ?? "Assignment failed");
+      }
+    } catch {
+      toast.error("Network error");
+    }
+  };
 
   if (isLoading || loading) {
     return (
@@ -146,6 +206,13 @@ export default function AdminClientCalendarPage() {
             <Zap className="h-4 w-4 mr-1.5" />
             Blog Automation
           </TabsTrigger>
+          <TabsTrigger
+            value="brief"
+            className="rounded-xl text-sm font-medium data-[state=active]:bg-background data-[state=active]:text-foreground text-muted-foreground px-5 py-2 transition-all"
+          >
+            <FileText className="h-4 w-4 mr-1.5" />
+            Brief & Strategy
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="calendar" className="space-y-8">
@@ -153,7 +220,7 @@ export default function AdminClientCalendarPage() {
           <div className="grid gap-4 grid-cols-4">
             {[
               { label: "Total", value: stats.total, bg: "bg-lavender" },
-              { label: "Ready", value: stats.ready, bg: "bg-yellow" },
+              { label: "Delivered", value: stats.delivered, bg: "bg-yellow" },
               { label: "Downloaded", value: stats.downloaded, bg: "bg-blue" },
               { label: "Posted", value: stats.posted, bg: "bg-mint" },
             ].map(s => (
@@ -224,13 +291,83 @@ export default function AdminClientCalendarPage() {
                 </div>
               </div>
 
-              <div className="flex gap-3 pt-6 border-t border-black/5">
+              <div className="mb-6">
+                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide block mb-1.5">Assignee</label>
+                <select
+                  value={selectedItem.assigneeId ?? ""}
+                  onChange={(e) => assignTo(e.target.value || null)}
+                  className="w-full max-w-xs h-10 rounded-xl border border-black/10 px-3 text-sm bg-white/60"
+                >
+                  <option value="">Unassigned</option>
+                  {team.map((m) => (
+                    <option key={m.userId} value={m.userId}>{m.name} ({m.role})</option>
+                  ))}
+                </select>
+              </div>
+
+              {["draft", "in_review", "revision_requested", "rejected"].includes(selectedItem.status) && (
+                <div className="mb-6">
+                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide block mb-1.5">Review note</label>
+                  <textarea
+                    value={note}
+                    onChange={(e) => setNote(e.target.value)}
+                    placeholder="Optional feedback for your team — required on reject / request-changes"
+                    className="w-full min-h-[72px] rounded-2xl bg-white/60 border border-black/10 px-4 py-3 text-sm outline-none focus:border-black/30 resize-y"
+                  />
+                </div>
+              )}
+              {selectedItem.reviewNote && (
+                <div className="mb-6 p-4 rounded-2xl bg-white/70 border border-black/5">
+                  <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide block mb-1">Last review note</span>
+                  <p className="text-sm whitespace-pre-wrap">{selectedItem.reviewNote}</p>
+                </div>
+              )}
+
+              <div className="flex flex-wrap gap-3 pt-6 border-t border-black/5">
+                {selectedItem.status === "draft" && (
+                  <>
+                    <Button onClick={() => updateStatus("in_review")} className="rounded-full bg-foreground text-background h-10 px-5 text-sm">
+                      Send for review
+                    </Button>
+                    <Button onClick={() => updateStatus("rejected")} variant="outline" className="rounded-full h-10 px-5 text-sm">
+                      Reject
+                    </Button>
+                  </>
+                )}
+                {selectedItem.status === "in_review" && (
+                  <>
+                    <Button onClick={() => updateStatus("approved")} className="rounded-full bg-foreground text-background h-10 px-5 text-sm">
+                      Approve
+                    </Button>
+                    <Button onClick={() => updateStatus("revision_requested")} variant="outline" className="rounded-full h-10 px-5 text-sm">
+                      Request changes
+                    </Button>
+                    <Button onClick={() => updateStatus("rejected")} variant="outline" className="rounded-full h-10 px-5 text-sm">
+                      Reject
+                    </Button>
+                  </>
+                )}
+                {selectedItem.status === "revision_requested" && (
+                  <Button onClick={() => updateStatus("in_review")} className="rounded-full bg-foreground text-background h-10 px-5 text-sm">
+                    Back to review
+                  </Button>
+                )}
+                {selectedItem.status === "approved" && (
+                  <Button onClick={() => updateStatus("delivered")} className="rounded-full bg-foreground text-background h-10 px-5 text-sm">
+                    Deliver to client
+                  </Button>
+                )}
+                {selectedItem.status === "rejected" && (
+                  <Button onClick={() => updateStatus("draft")} className="rounded-full bg-foreground text-background h-10 px-5 text-sm">
+                    Reopen
+                  </Button>
+                )}
                 <a
                   href={selectedItem.fileUrl}
                   download
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex items-center rounded-full bg-foreground hover:bg-foreground/90 text-background h-10 px-5 text-sm font-medium"
+                  className="inline-flex items-center rounded-full border border-black/10 hover:bg-black/5 h-10 px-5 text-sm font-medium transition-colors"
                 >
                   <Download className="h-4 w-4 mr-1.5" />
                   Download
@@ -255,6 +392,10 @@ export default function AdminClientCalendarPage() {
 
         <TabsContent value="automation">
           <BlogAutomationSettings clientId={clientId} clientName={clientName || "this client"} />
+        </TabsContent>
+
+        <TabsContent value="brief">
+          <ClientBriefStrategy clientId={clientId} />
         </TabsContent>
       </Tabs>
     </div>

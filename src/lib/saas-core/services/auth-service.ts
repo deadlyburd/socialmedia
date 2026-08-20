@@ -362,6 +362,31 @@ export class AuthService {
     }
   }
 
+  /** Resolve a client's tenant from the DB by email (cold-start / ID-mismatch fallback). */
+  async getClientTenantIdFromDB(email: string): Promise<string | null> {
+    try {
+      const supabase = getAdminClient();
+      const normalized = email.toLowerCase().trim();
+      // Supabase Auth UUID ≠ our users.id — resolve the custom id via email first.
+      const { data: user } = await supabase
+        .from("users")
+        .select("id")
+        .eq("email", normalized)
+        .maybeSingle();
+      if (!user) return null;
+      const userId = (user as any).id as string;
+
+      const { data: tenant } = await supabase
+        .from("tenants")
+        .select("id")
+        .eq("client_user_id", userId)
+        .maybeSingle();
+      return ((tenant as any)?.id as string) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   // ── Onboarding steps ───────────────────────────────────────────────
 
   private ensureOnboarding(userId: string): OnboardingState {
@@ -408,27 +433,6 @@ export class AuthService {
     return { ...state };
   }
 
-  async setWebsite(userId: string, url: string): Promise<OnboardingState> {
-    const state = this.ensureOnboarding(userId);
-    state.websiteUrl = url;
-    state.websiteAnalysis = await this.analyzeWebsite(url);
-    state.step = "done";
-
-    // Persist to Supabase
-    const supabase = getAdminClient();
-    supabase.from("onboarding").upsert({
-      user_id: userId,
-      step: "done",
-      website_url: url,
-      website_analysis: state.websiteAnalysis,
-      updated_at: new Date().toISOString(),
-    }).then(({ error }) => {
-      if (error) console.error("[AuthService] setWebsite persist error:", error.message);
-    });
-
-    return { ...state };
-  }
-
   /** Save website URL only — no analysis. Used by simplified onboarding. */
   setWebsiteUrlOnly(userId: string, url: string): OnboardingState {
     const state = this.ensureOnboarding(userId);
@@ -449,36 +453,5 @@ export class AuthService {
       if (s.email === email) return s;
     }
     return undefined;
-  }
-
-  private async analyzeWebsite(url: string): Promise<WebsiteAnalysis> {
-    // Try Firecrawl first, fall back to mock data
-    try {
-      const { websiteScraper } = await import("./website-scraper");
-      const result = await websiteScraper.analyze(url);
-      if (result) return result;
-    } catch (err: any) {
-      console.log("[AuthService] Firecrawl unavailable, using mock:", err.message);
-    }
-
-    // Mock fallback
-    const normalized = url.replace(/https?:\/\//, "").replace(/\/$/, "");
-    const domain = normalized.split(".")[0] ?? "business";
-    const displayDomain = domain.charAt(0).toUpperCase() + domain.slice(1);
-
-    return {
-      url: `https://${normalized}`,
-      title: `${displayDomain} — Official Site`,
-      description: `${displayDomain} offers premium services and experiences.`,
-      industry: "general",
-      keywords: [],
-      products: [],
-      socialLinks: {},
-      suggestedPack: "custom",
-      confidence: 0.5,
-      uxFlaws: [],
-      uxScore: 70,
-      contentCalendar: [],
-    };
   }
 }

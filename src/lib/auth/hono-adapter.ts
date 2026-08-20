@@ -156,12 +156,32 @@ export async function requireClient(c: Context, next: Next): Promise<Response | 
 }
 
 /**
+ * Resolve the effective agency owner ID for a user.
+ *
+ * Team members carry `agency_id` = their owner's user id; the owner themselves
+ * have `agency_id` null. So the effective owner is `agency_id ?? id`. This lets
+ * any team member pass agency-scoped checks without each endpoint knowing the
+ * team-member model.
+ */
+export async function resolveAgencyOwnerId(userId: string): Promise<string> {
+  const { getAdminClient } = await import("@/lib/supabase/admin");
+  const supabase = getAdminClient();
+  const { data } = await supabase
+    .from("users")
+    .select("agency_id")
+    .eq("id", userId)
+    .maybeSingle();
+  return ((data as any)?.agency_id as string) ?? userId;
+}
+
+/**
  * requireAgencyAccess — verifies the tenant belongs to the admin's agency.
- * Must be used AFTER requireAuth + requireAdmin.
+ * Allows team members (whose `agency_id` points at the owner) in addition to
+ * the owner. Must be used AFTER requireAuth + requireAdmin.
  */
 export async function requireAgencyAccess(c: Context, next: Next): Promise<Response | void> {
   const session = c.get("session");
-  const tenantId = c.req.param("tenantId") ?? c.req.param("clientId") ?? c.req.query("tenantId");
+  const tenantId = c.req.param("tenantId") ?? c.req.param("clientId") ?? c.req.param("id") ?? c.req.query("tenantId");
 
   if (!tenantId) {
     return c.json(
@@ -170,14 +190,16 @@ export async function requireAgencyAccess(c: Context, next: Next): Promise<Respo
     );
   }
 
-  // Check if the tenant has this admin as agency_id
+  // Resolve the effective owner: team members act on behalf of their agency owner.
+  const ownerId = await resolveAgencyOwnerId(session.sub);
+
   const { data: tenant } = await (await import("@/lib/supabase/admin")).getAdminClient()
     .from("tenants")
     .select("agency_id")
     .eq("id", tenantId)
     .maybeSingle();
 
-  if (!tenant || tenant.agency_id !== session.sub) {
+  if (!tenant || (tenant as any).agency_id !== ownerId) {
     return c.json(
       { success: false, error: "Access denied. This client does not belong to your agency." },
       403,

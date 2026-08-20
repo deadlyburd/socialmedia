@@ -162,7 +162,7 @@ export function honoErrorHandler(err: Error, c: Context) {
       path: c.req.path,
       method: c.req.method,
     });
-    return c.json(err.toResponse(), { status: err.statusCode as 400 | 401 | 403 | 404 | 429 });
+    return c.json(err.toResponse(), { status: err.statusCode as 400 | 401 | 402 | 403 | 404 | 429 });
   }
 
   // Unexpected errors
@@ -255,6 +255,12 @@ export const schemas = {
     platform: z.enum(["instagram", "tiktok", "facebook", "linkedin", "youtube", "pinterest", "twitter"]),
   }),
 
+  /** Update content production status (admin review / approve / deliver / reject) */
+  contentStatus: z.object({
+    status: z.enum(["planned", "draft", "in_review", "revision_requested", "approved", "delivered", "rejected"]),
+    note: z.string().max(1000).optional(),
+  }),
+
   /** Blog automation config */
   blogAutomationConfig: z.object({
     blogEnabled: z.boolean().optional(),
@@ -285,5 +291,66 @@ export const schemas = {
   pagination: z.object({
     page: z.coerce.number().int().min(1).default(1),
     limit: z.coerce.number().int().min(1).max(100).default(20),
+  }),
+
+  /** Client requirements / brief */
+  brief: z.object({
+    brandVoice: z.string().max(2000).nullable().optional(),
+    targetAudience: z.string().max(2000).nullable().optional(),
+    goals: z.string().max(2000).nullable().optional(),
+    contentPillars: z.array(z.object({
+      name: z.string().min(1),
+      share: z.number().min(0).max(100).optional(),
+    })).optional(),
+    platforms: z.array(z.object({
+      platform: z.string().min(1),
+      handle: z.string().optional(),
+      cadence: z.string().optional(),
+    })).optional(),
+    styleGuidelines: z.record(z.unknown()).optional(),
+    notes: z.string().max(2000).nullable().optional(),
+    status: z.enum(["draft", "active", "archived"]).optional(),
+  }),
+
+  /** Content strategy / plan */
+  strategy: z.object({
+    name: z.string().min(1).max(200),
+    pillars: z.array(z.object({
+      name: z.string().min(1),
+      share: z.number().min(0).max(100).optional(),
+    })).optional(),
+    formatMix: z.record(z.number()).optional(),
+    cadence: z.record(z.string()).optional(),
+    timelineStart: z.string().nullable().optional(),
+    timelineEnd: z.string().nullable().optional(),
+    status: z.enum(["active", "archived"]).optional(),
+  }),
+
+  /** Invite a team member */
+  teamInvite: z.object({
+    name: z.string().min(1).max(100),
+    email: z.string().email("Valid email is required"),
+    role: z.enum(["owner", "manager", "creator", "editor"]),
+    password: z.string().min(8).optional(),
+  }),
+
+  /** Update a team member's role */
+  teamUpdate: z.object({
+    role: z.enum(["owner", "manager", "creator", "editor"]),
+  }),
+
+  /** Assign a team member to a content asset */
+  assignContent: z.object({
+    assigneeId: z.string().nullable(),
+  }),
+
+  /** Client requests changes to content */
+  requestChanges: z.object({
+    comment: z.string().min(1, "A comment is required").max(2000),
+  }),
+
+  /** Add a comment to a content asset */
+  comment: z.object({
+    body: z.string().min(1, "Comment is required").max(2000),
   }),
 } as const;

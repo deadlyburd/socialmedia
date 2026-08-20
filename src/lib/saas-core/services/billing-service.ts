@@ -7,8 +7,8 @@
 
 import { stripe } from "@/lib/stripe";
 import { getPriceIdForTier, getTierForPriceId } from "@/lib/stripe-prices";
-import type { SubscriptionTier, Tenant } from "@/lib/saas-core/types";
-import { tenantService } from "./tenant-service";
+import type { SubscriptionTier } from "@/lib/saas-core/types";
+import { getTenantFromDB } from "./entitlements";
 
 /** Generate a random suffix for integration_identifier (Stripe best practice). */
 function randomSuffix(): string {
@@ -137,12 +137,14 @@ class BillingService {
 
   /**
    * Get subscription info for a tenant (looks up by stripe_customer_id on the tenant).
+   * Reads the tenant directly from Supabase — not the in-memory TenantService Map,
+   * which is stale/incomplete on cold starts.
    */
   async getTenantSubscription(tenantId: string): Promise<SubscriptionInfo | null> {
-    const tenant = tenantService.getTenant(tenantId);
-    if (!tenant?.stripeCustomerId) {
+    const tenant = await getTenantFromDB(tenantId);
+    if (!tenant?.stripe_customer_id) {
       return {
-        tier: tenant?.tier ?? "free",
+        tier: (tenant?.tier as SubscriptionTier) ?? "free",
         status: tenant?.status ?? "inactive",
         currentPeriodEnd: null,
         customerId: null,
@@ -151,7 +153,7 @@ class BillingService {
       };
     }
 
-    return this.getSubscription(tenant.stripeCustomerId);
+    return this.getSubscription(tenant.stripe_customer_id);
   }
 
   /**
@@ -185,34 +187,24 @@ class BillingService {
       }
     }
 
-    // Update tenant tier and stripe IDs
-    tenantService.updateTier(tenantId, tier);
-    const tenant = tenantService.getTenant(tenantId);
-    if (tenant) {
-      tenant.stripeCustomerId = customerId;
-      tenant.stripeSubscriptionId = subscriptionId;
-      tenant.stripePriceId = getPriceIdForTier(tier) ?? undefined;
-      tenant.currentPeriodEnd = currentPeriodEnd ?? undefined;
+    // Update tenant tier and stripe IDs directly in Supabase (skip in-memory Map).
+    const { getAdminClient } = await import("@/lib/supabase/admin");
+    const supabase = getAdminClient();
+    await supabase
+      .from("tenants")
+      .update({
+        tier,
+        status: "active",
+        stripe_customer_id: customerId,
+        stripe_subscription_id: subscriptionId,
+        stripe_price_id: getPriceIdForTier(tier),
+        current_period_end: currentPeriodEnd,
+        subscription_status: "active",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", tenantId);
 
-      // Update status to active
-      const { getAdminClient } = await import("@/lib/supabase/admin");
-      const supabase = getAdminClient();
-      await supabase
-        .from("tenants")
-        .update({
-          tier,
-          status: "active",
-          stripe_customer_id: customerId,
-          stripe_subscription_id: subscriptionId,
-          stripe_price_id: getPriceIdForTier(tier),
-          current_period_end: currentPeriodEnd,
-          subscription_status: "active",
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", tenantId);
-
-      console.log(`[billing] Tenant ${tenantId} upgraded to ${tier} (customer: ${customerId})`);
-    }
+    console.log(`[billing] Tenant ${tenantId} upgraded to ${tier} (customer: ${customerId})`);
   }
 
   /**
@@ -231,39 +223,28 @@ class BillingService {
     const tier = getTierForPriceId(priceId);
     const currentPeriodEnd = new Date(subscription.current_period_end * 1000).toISOString();
 
-    // Update tenant
-    tenantService.updateTier(tenantId, tier);
-    const tenant = tenantService.getTenant(tenantId);
-    if (tenant) {
-      tenant.stripeCustomerId = customerId;
-      tenant.stripeSubscriptionId = subscription.id;
-      tenant.stripePriceId = priceId || undefined;
-      tenant.currentPeriodEnd = currentPeriodEnd;
+    // Update tenant directly in Supabase.
+    const status = subscription.status === "active" || subscription.status === "past_due"
+      ? "active"
+      : "active";
 
-      const status = subscription.status === "active"
-        ? "active"
-        : subscription.status === "past_due"
-          ? "active" // keep active but note past_due
-          : "active";
+    const { getAdminClient } = await import("@/lib/supabase/admin");
+    const supabase = getAdminClient();
+    await supabase
+      .from("tenants")
+      .update({
+        tier,
+        status,
+        stripe_customer_id: customerId,
+        stripe_subscription_id: subscription.id,
+        stripe_price_id: priceId,
+        current_period_end: currentPeriodEnd,
+        subscription_status: subscription.status,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", tenantId);
 
-      const { getAdminClient } = await import("@/lib/supabase/admin");
-      const supabase = getAdminClient();
-      await supabase
-        .from("tenants")
-        .update({
-          tier,
-          status,
-          stripe_customer_id: customerId,
-          stripe_subscription_id: subscription.id,
-          stripe_price_id: priceId,
-          current_period_end: currentPeriodEnd,
-          subscription_status: subscription.status,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", tenantId);
-
-      console.log(`[billing] Tenant ${tenantId} subscription updated to ${tier} (${subscription.status})`);
-    }
+    console.log(`[billing] Tenant ${tenantId} subscription updated to ${tier} (${subscription.status})`);
   }
 
   /**
@@ -277,10 +258,7 @@ class BillingService {
       return;
     }
 
-    // Downgrade to free
-    tenantService.updateTier(tenantId, "free");
-    tenantService.updateStatus(tenantId, "active"); // keep active, just on free
-
+    // Downgrade to free directly in Supabase.
     const { getAdminClient } = await import("@/lib/supabase/admin");
     const supabase = getAdminClient();
     await supabase

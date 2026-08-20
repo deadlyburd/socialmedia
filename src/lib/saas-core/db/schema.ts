@@ -129,8 +129,17 @@ export interface ApiUsageRow {
 
 // ── Content Assets (agency-uploaded) ─────────────────────────────────
 
-export type ContentType = "video" | "image" | "carousel" | "reel" | "story" | "feed_post";
-export type ContentAssetStatus = "processing" | "ready" | "downloaded" | "posted";
+export type ContentType = "video" | "image" | "carousel" | "reel" | "story" | "feed_post" | "blog";
+export type ContentAssetStatus =
+  | "planned"
+  | "draft"
+  | "in_review"
+  | "revision_requested"
+  | "approved"
+  | "delivered"
+  | "downloaded"
+  | "posted"
+  | "rejected";
 
 export interface ContentAssetRow {
   id: string;
@@ -146,10 +155,66 @@ export interface ContentAssetRow {
   platform: string;
   scheduledDate: string;
   status: ContentAssetStatus;
+  caption: string | null;
+  hashtagsJson: string;
+  carouselItemsJson: string | null;
+  assigneeId: string | null;
+  reviewedBy: string | null;
+  reviewedAt: string | null;
+  reviewNote: string | null;
+  downloadedAt: string | null;
+  postedAt: string | null;
+  postedUrl: string | null;
   createdAt: string;
   createdBy: string;
+}
+
+// ── Client Briefs ─────────────────────────────────────────────────────
+
+export interface ClientBriefRow {
+  id: string;
+  tenantId: string;
+  brandVoice: string | null;
+  targetAudience: string | null;
+  goals: string | null;
+  contentPillarsJson: string;
+  platformsJson: string;
+  styleGuidelinesJson: string;
+  notes: string | null;
+  status: "draft" | "active" | "archived";
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ── Content Strategies ────────────────────────────────────────────────
+
+export interface ContentStrategyRow {
+  id: string;
+  tenantId: string;
+  name: string;
+  pillarsJson: string;
+  formatMixJson: string;
+  cadenceJson: string;
+  timelineStart: string | null;
+  timelineEnd: string | null;
+  status: "active" | "archived";
+  createdAt: string;
+  updatedAt: string;
 }
 
 // ── User Roles ───────────────────────────────────────────────────────
 
 export type UserRole = "admin" | "client";
+export type AgencyRole = "owner" | "manager" | "creator" | "editor";
+
+// ── Asset Comments ────────────────────────────────────────────────────
+
+export interface AssetCommentRow {
+  id: string;
+  assetId: string;
+  tenantId: string;
+  authorId: string | null;
+  authorRole: "admin" | "client";
+  body: string;
+  createdAt: string;
+}

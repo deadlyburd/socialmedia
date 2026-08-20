@@ -665,10 +665,10 @@ export async function generateSingleBlog(
       title: blog.title,
       description: blog.excerpt,
       file_url: blog.body,
-      content_type: "feed_post",
+      content_type: "blog",
       platform: "web",
       scheduled_date: today,
-      status: pushed ? "posted" : "ready",
+      status: pushed ? "posted" : "delivered",
       created_at: new Date().toISOString(),
       created_by: "system",
     });

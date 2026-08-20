@@ -9,7 +9,7 @@ function getBase(): string | undefined {
   return process.env.SUPABASE_URL;
 }
 function getKey(): string | undefined {
-  return process.env.SUPABASE_SERVICE_API_KEY;
+  return process.env.SUPABASE_SERVICE_KEY;
 }
 
 async function rest(

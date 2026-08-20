@@ -57,25 +57,6 @@ export async function createUser(params: {
 }
 
 export async function getUserByEmail(email: string): Promise<StoredUser | null> {
-  console.log("[user-store] getUserByEmail query for:", email.toLowerCase().trim());
-
-  // Diagnostic: test raw fetch to Supabase
-  try {
-    const testUrl = `${process.env.SUPABASE_URL}/rest/v1/users?select=id&limit=1`;
-    console.log("[user-store] Testing raw fetch to:", testUrl);
-    const testRes = await fetch(testUrl, {
-      headers: {
-        "apikey": process.env.SUPABASE_SERVICE_KEY!,
-        "Authorization": `Bearer ${process.env.SUPABASE_SERVICE_KEY!}`,
-      },
-    });
-    console.log("[user-store] Raw fetch status:", testRes.status);
-    const testData = await testRes.text();
-    console.log("[user-store] Raw fetch response:", testData.substring(0, 200));
-  } catch (fetchErr: any) {
-    console.error("[user-store] Raw fetch FAILED:", fetchErr.message, fetchErr.cause?.message || "");
-  }
-
   const supabase = getAdminClient();
   const { data, error } = await supabase
     .from("users")
@@ -83,15 +64,9 @@ export async function getUserByEmail(email: string): Promise<StoredUser | null> 
     .eq("email", email.toLowerCase().trim())
     .maybeSingle();
 
-  if (error) {
-    console.error("[user-store] getUserByEmail Supabase error:", error.message, error.code, error.details || "");
+  if (error || !data) {
     return null;
   }
-  if (!data) {
-    console.error("[user-store] getUserByEmail: no user found for email");
-    return null;
-  }
-  console.log("[user-store] getUserByEmail: user found, onboarding_complete:", data.onboarding_complete);
   return mapRow(data);
 }
 
@@ -188,17 +163,22 @@ export async function getUserRole(userId: string): Promise<"admin" | "client" | 
 
 export async function getClientsByAdmin(adminId: string): Promise<StoredUser[]> {
   const supabase = getAdminClient();
+  // Tenants owned by this agency, joined to their client login user via client_user_id.
   const { data: tenants } = await supabase
     .from("tenants")
-    .select("id")
+    .select("client_user_id")
     .eq("agency_id", adminId);
   if (!tenants?.length) return [];
 
-  // Get users linked to those tenants via the tenant_service
+  const clientIds = tenants
+    .map((t: any) => t.client_user_id as string | null)
+    .filter((id): id is string => Boolean(id));
+  if (!clientIds.length) return [];
+
   const { data: users } = await supabase
     .from("users")
     .select("*")
-    .eq("role", "client");
+    .in("id", clientIds);
 
   if (!users?.length) return [];
   return users.map(mapRow);
